@@ -30,6 +30,87 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  capabilities?: Partial<Record<PluginName, boolean>>; // Per-group plugin overrides
+}
+
+// --- Plugin capabilities ---
+
+export type PluginName =
+  | 'gcloud'
+  | 'gcpLogging'
+  | 'codeTasks'
+  | 'worktrees'
+  | 'gh'
+  | 'azure'
+  | 'appInsights';
+
+export type CapabilitiesConfig = Record<PluginName, boolean>;
+
+// --- Plugin system ---
+
+export interface PluginPrerequisite {
+  type: 'file' | 'env' | 'command';
+  /** For 'file': path (supports ~). For 'env': var name. For 'command': binary name. */
+  path: string;
+  description: string;
+}
+
+export interface PluginMount {
+  hostPath: string;
+  containerPath: string;
+  readonly: boolean;
+  /** Only mount when this prerequisite is satisfied, e.g. "prerequisite:0" */
+  condition?: string;
+}
+
+export interface PluginMcpServer {
+  /** Relative path to compiled .js file inside agent-runner dist dir */
+  scriptPath: string;
+  env?: Record<string, string>;
+}
+
+export interface PluginContainerConfig {
+  mounts: PluginMount[];
+  envVars: Record<string, string>;
+  entrypointCommands: string[];
+  mcpServers: Record<string, PluginMcpServer>;
+  allowedTools: string[];
+  /** Skill directory names under container/skills/ to sync */
+  skills: string[];
+}
+
+export interface PluginManifest {
+  name: string;
+  description: string;
+  prerequisites: PluginPrerequisite[];
+  container: PluginContainerConfig;
+  /** Host-side behavioral toggles */
+  hostBehavior?: {
+    worktrees?: boolean;
+  };
+  setupInstructions: string;
+}
+
+export interface PluginStatus {
+  name: string;
+  enabled: boolean;
+  ready: boolean;
+  failedPrerequisites: Array<{
+    index: number;
+    prerequisite: PluginPrerequisite;
+    reason: string;
+  }>;
+  setupInstructions: string;
+}
+
+export interface ResolvedPluginHooks {
+  mounts: PluginMount[];
+  envVars: Record<string, string>;
+  entrypointCommands: string[];
+  mcpServers: Record<string, PluginMcpServer>;
+  allowedTools: string[];
+  skills: string[];
+  worktreesEnabled: boolean;
 }
 
 export interface RegisteredGroup {
@@ -51,6 +132,11 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  thread_ts?: string; // Thread parent timestamp (Slack threads)
+}
+
+export interface SendMessageOptions {
+  threadId?: string; // Reply in-thread (e.g. Slack thread_ts)
 }
 
 export interface ScheduledTask {
@@ -82,7 +168,11 @@ export interface TaskRunLog {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(
+    jid: string,
+    text: string,
+    options?: SendMessageOptions,
+  ): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;

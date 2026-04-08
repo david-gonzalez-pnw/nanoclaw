@@ -1,0 +1,14 @@
+{
+  "name": "codeTasks",
+  "description": "Code task execution — bug fixes, feature implementations, PR creation from Slack",
+  "prerequisites": [],
+  "container": {
+    "mounts": [],
+    "envVars": {},
+    "entrypointCommands": [],
+    "mcpServers": {},
+    "allowedTools": [],
+    "skills": ["code-tasks"]
+  },
+  "setupInstructions": "No setup required. Enable this plugin and the code-tasks skill will be available to the agent."
+}

@@ -1,0 +1,29 @@
+{
+  "name": "gh",
+  "description": "GitHub CLI — create PRs, manage issues, review code from the container",
+  "prerequisites": [
+    {
+      "type": "file",
+      "path": "~/.config/nanoclaw/github-token",
+      "description": "GitHub personal access token (classic or fine-grained)"
+    }
+  ],
+  "container": {
+    "mounts": [
+      {
+        "hostPath": "~/.config/nanoclaw/github-token",
+        "containerPath": "/secrets/github-token",
+        "readonly": true,
+        "condition": "prerequisite:0"
+      }
+    ],
+    "envVars": {},
+    "entrypointCommands": [
+      "if [ -f /secrets/github-token ]; then gh auth login --with-token < /secrets/github-token 2>&1 >&2 || true; gh auth setup-git 2>&1 >&2 || true; git config --global url.\"https://github.com/\".insteadOf \"git@github.com:\"; git config --global url.\"https://github.com/\".insteadOf \"git@github.com-personal:\"; git config --global url.\"https://github.com/\".insteadOf \"git@github.com-fusion:\"; fi"
+    ],
+    "mcpServers": {},
+    "allowedTools": [],
+    "skills": []
+  },
+  "setupInstructions": "Create a GitHub personal access token at https://github.com/settings/tokens and save it to ~/.config/nanoclaw/github-token (just the token string, no quotes)"
+}

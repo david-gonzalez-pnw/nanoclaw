@@ -1,0 +1,17 @@
+{
+  "name": "worktrees",
+  "description": "Per-thread git worktrees — each Slack thread gets an isolated branch for code changes",
+  "prerequisites": [],
+  "container": {
+    "mounts": [],
+    "envVars": {},
+    "entrypointCommands": [],
+    "mcpServers": {},
+    "allowedTools": [],
+    "skills": []
+  },
+  "hostBehavior": {
+    "worktrees": true
+  },
+  "setupInstructions": "No setup required. When enabled, threaded messages with mounted git repos automatically get isolated worktrees."
+}

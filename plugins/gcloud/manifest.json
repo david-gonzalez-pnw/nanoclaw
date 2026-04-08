@@ -1,0 +1,29 @@
+{
+  "name": "gcloud",
+  "description": "Google Cloud CLI — authenticated access to GCP services",
+  "prerequisites": [
+    {
+      "type": "file",
+      "path": "~/.config/nanoclaw/gcp-service-account.json",
+      "description": "GCP service account key file"
+    }
+  ],
+  "container": {
+    "mounts": [
+      {
+        "hostPath": "~/.config/nanoclaw/gcp-service-account.json",
+        "containerPath": "/secrets/gcp-service-account.json",
+        "readonly": true,
+        "condition": "prerequisite:0"
+      }
+    ],
+    "envVars": {},
+    "entrypointCommands": [
+      "if [ -f /secrets/gcp-service-account.json ]; then gcloud auth activate-service-account --key-file=/secrets/gcp-service-account.json --quiet 2>&1 >&2 || true; PROJECT_ID=$(grep -o '\"project_id\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' /secrets/gcp-service-account.json | head -1 | sed 's/.*\"project_id\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/'); [ -n \"$PROJECT_ID\" ] && gcloud config set project \"$PROJECT_ID\" --quiet 2>&1 >&2 || true; fi"
+    ],
+    "mcpServers": {},
+    "allowedTools": [],
+    "skills": []
+  },
+  "setupInstructions": "Create a GCP service account with the roles you need (e.g. Logs Viewer, Cloud Functions Viewer) and download the JSON key to ~/.config/nanoclaw/gcp-service-account.json"
+}
