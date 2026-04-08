@@ -106,6 +106,13 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add thread_ts column if it doesn't exist (migration for Slack thread context)
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN thread_ts TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
   // Add is_main column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -139,6 +146,22 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Worktrees table for per-thread git worktree isolation
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS worktrees (
+      thread_ts TEXT NOT NULL,
+      repo_host_path TEXT NOT NULL,
+      worktree_host_path TEXT NOT NULL,
+      branch_name TEXT NOT NULL,
+      container_path TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT NOT NULL,
+      retain_until TEXT,
+      PRIMARY KEY (thread_ts, repo_host_path)
+    )
+  `);
 }
 
 export function initDatabase(): void {
@@ -262,7 +285,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, thread_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -272,6 +295,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.thread_ts || null,
   );
 }
 
@@ -316,7 +340,7 @@ export function getNewMessages(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, thread_ts
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -349,7 +373,7 @@ export function getMessagesSince(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, thread_ts
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -694,4 +718,79 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// --- Worktree accessors ---
+
+export interface WorktreeEntry {
+  thread_ts: string;
+  repo_host_path: string;
+  worktree_host_path: string;
+  branch_name: string;
+  container_path: string;
+  group_folder: string;
+  created_at: string;
+  last_used_at: string;
+  retain_until: string | null;
+}
+
+export function getWorktrees(threadTs: string): WorktreeEntry[] {
+  return db
+    .prepare('SELECT * FROM worktrees WHERE thread_ts = ?')
+    .all(threadTs) as WorktreeEntry[];
+}
+
+export function upsertWorktree(entry: WorktreeEntry): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO worktrees
+     (thread_ts, repo_host_path, worktree_host_path, branch_name, container_path, group_folder, created_at, last_used_at, retain_until)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    entry.thread_ts,
+    entry.repo_host_path,
+    entry.worktree_host_path,
+    entry.branch_name,
+    entry.container_path,
+    entry.group_folder,
+    entry.created_at,
+    entry.last_used_at,
+    entry.retain_until,
+  );
+}
+
+export function deleteWorktree(threadTs: string, repoHostPath: string): void {
+  db.prepare(
+    'DELETE FROM worktrees WHERE thread_ts = ? AND repo_host_path = ?',
+  ).run(threadTs, repoHostPath);
+}
+
+export function getExpiredWorktrees(maxAgeMs: number): WorktreeEntry[] {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const now = new Date().toISOString();
+  return db
+    .prepare(
+      `SELECT * FROM worktrees
+       WHERE last_used_at < ?
+       AND (retain_until IS NULL OR retain_until < ?)`,
+    )
+    .all(cutoff, now) as WorktreeEntry[];
+}
+
+export function setRetainUntil(
+  threadTs: string,
+  retainUntil: string | null,
+): void {
+  db.prepare('UPDATE worktrees SET retain_until = ? WHERE thread_ts = ?').run(
+    retainUntil,
+    threadTs,
+  );
+}
+
+export function getAllWorktreeEntries(): WorktreeEntry[] {
+  return db.prepare('SELECT * FROM worktrees').all() as WorktreeEntry[];
+}
+
+/** Get the DB path for worker threads that need their own connection. */
+export function getDatabasePath(): string {
+  return path.join(STORE_DIR, 'messages.db');
 }

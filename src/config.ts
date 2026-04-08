@@ -71,3 +71,19 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// GCP service account for Cloud Logging MCP tool (stored outside project root)
+export const GCP_SERVICE_ACCOUNT_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'gcp-service-account.json',
+);
+
+// Worktree cleanup: stale worktrees older than this are removed
+export const WORKTREE_MAX_AGE_MS = parseInt(
+  process.env.WORKTREE_MAX_AGE_MS || String(24 * 60 * 60 * 1000),
+  10,
+); // 24 hours default
+export const WORKTREE_CLEANUP_CRON =
+  process.env.WORKTREE_CLEANUP_CRON || '0 3 * * *'; // daily at 3 AM
