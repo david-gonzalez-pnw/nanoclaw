@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -27,7 +28,9 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { resolveActivePlugins } from './plugin-loader.js';
 import { RegisteredGroup } from './types.js';
+import { getOrCreateWorktree } from './worktree-manager.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -41,6 +44,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  threadId?: string;
 }
 
 export interface ContainerOutput {
@@ -59,6 +63,8 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  threadId?: string,
+  pluginHooks?: import('./types.js').ResolvedPluginHooks,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -147,12 +153,37 @@ function buildVolumeMounts(
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
+  // Plugin-owned skills (listed in a plugin manifest) only sync when that plugin is active.
+  // Skills not owned by any plugin (e.g., status, capabilities) always sync.
+  const pluginOwnedSkills = new Set<string>();
+  const activePluginSkills = new Set(pluginHooks?.skills || []);
+  // Scan manifests to find all plugin-owned skills
+  try {
+    const pluginsDir = path.join(process.cwd(), 'plugins');
+    if (fs.existsSync(pluginsDir)) {
+      for (const dir of fs.readdirSync(pluginsDir)) {
+        const mPath = path.join(pluginsDir, dir, 'manifest.json');
+        if (fs.existsSync(mPath)) {
+          const m = JSON.parse(fs.readFileSync(mPath, 'utf-8'));
+          for (const s of m.container?.skills || []) {
+            pluginOwnedSkills.add(s);
+          }
+        }
+      }
+    }
+  } catch {
+    /* ignore manifest parse errors here */
+  }
+
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
+      // Skip plugin-owned skills that aren't active
+      if (pluginOwnedSkills.has(skillDir) && !activePluginSkills.has(skillDir))
+        continue;
       const dstDir = path.join(skillsDst, skillDir);
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
@@ -174,6 +205,26 @@ function buildVolumeMounts(
     containerPath: '/workspace/ipc',
     readonly: false,
   });
+
+  // Per-thread IPC input: shadow-mount a thread-specific input directory
+  // over /workspace/ipc/input/ so each thread's container has isolated
+  // message piping and _close sentinels.
+  if (threadId) {
+    const threadInputDir = path.join(
+      DATA_DIR,
+      'ipc',
+      group.folder,
+      'threads',
+      threadId.replace(/\./g, '-'),
+      'input',
+    );
+    fs.mkdirSync(threadInputDir, { recursive: true });
+    mounts.push({
+      hostPath: threadInputDir,
+      containerPath: '/workspace/ipc/input',
+      readonly: false,
+    });
+  }
 
   // Copy agent-runner source into a per-group writable location so agents
   // can customize it (add tools, change behavior) without affecting other
@@ -206,7 +257,107 @@ function buildVolumeMounts(
       group.name,
       isMain,
     );
-    mounts.push(...validatedMounts);
+
+    // For threaded messages, substitute writable git repo mounts with per-thread worktrees
+    const worktreesEnabled = pluginHooks?.worktreesEnabled ?? true;
+    if (threadId && worktreesEnabled) {
+      for (const mount of validatedMounts) {
+        if (!mount.readonly) {
+          const containerPath = mount.containerPath.replace(
+            /^\/workspace\/extra\//,
+            '',
+          );
+          const worktreePath = getOrCreateWorktree(
+            mount.hostPath,
+            threadId,
+            containerPath,
+            group.folder,
+          );
+          if (worktreePath) {
+            mounts.push({
+              hostPath: worktreePath,
+              containerPath: mount.containerPath,
+              readonly: false,
+            });
+
+            // Mount the original repo's .git directory so git operations
+            // (commit, push, PR) work inside the container. The worktree's
+            // .git file references a host-absolute path — we shadow it with
+            // a container-relative version via a file mount.
+            const repoGitDir = path.join(mount.hostPath, '.git');
+            if (
+              fs.existsSync(repoGitDir) &&
+              fs.statSync(repoGitDir).isDirectory()
+            ) {
+              const containerGitDir = `${mount.containerPath}/.repo-git`;
+              mounts.push({
+                hostPath: repoGitDir,
+                containerPath: containerGitDir,
+                readonly: false,
+              });
+
+              // Create a container-specific .git file that points to the
+              // container path, and mount it over the worktree's .git file.
+              const worktreeGitFile = path.join(worktreePath, '.git');
+              try {
+                const gitFileContent = fs
+                  .readFileSync(worktreeGitFile, 'utf-8')
+                  .trim();
+                const wtMatch = gitFileContent.match(
+                  /gitdir:\s*.*\.git\/worktrees\/(.+)/,
+                );
+                if (wtMatch) {
+                  const worktreeName = wtMatch[1];
+                  // Write the container-mapped .git file to a temp location
+                  const containerGitFile = path.join(
+                    worktreePath,
+                    '.git-container',
+                  );
+                  fs.writeFileSync(
+                    containerGitFile,
+                    `gitdir: ${containerGitDir}/worktrees/${worktreeName}\n`,
+                  );
+                  // Shadow-mount it over the worktree's .git file inside the container
+                  mounts.push({
+                    hostPath: containerGitFile,
+                    containerPath: `${mount.containerPath}/.git`,
+                    readonly: false,
+                  });
+                }
+              } catch (err) {
+                logger.warn(
+                  { worktreePath, err },
+                  'Failed to create container .git file for worktree',
+                );
+              }
+            }
+
+            continue;
+          }
+        }
+        mounts.push(mount);
+      }
+    } else {
+      mounts.push(...validatedMounts);
+    }
+  }
+
+  // Plugin-contributed mounts (replaces hardcoded GCP service account mount)
+  if (pluginHooks) {
+    const homeDir = process.env.HOME || os.homedir();
+    for (const mount of pluginHooks.mounts) {
+      let hostPath = mount.hostPath;
+      if (hostPath.startsWith('~/')) {
+        hostPath = path.join(homeDir, hostPath.slice(2));
+      }
+      if (fs.existsSync(hostPath)) {
+        mounts.push({
+          hostPath,
+          containerPath: mount.containerPath,
+          readonly: mount.readonly,
+        });
+      }
+    }
   }
 
   return mounts;
@@ -215,6 +366,7 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  pluginHooks?: import('./types.js').ResolvedPluginHooks,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -259,6 +411,38 @@ function buildContainerArgs(
     }
   }
 
+  // Plugin-contributed env vars and container-side config
+  if (pluginHooks) {
+    // Entrypoint commands (base64-encoded JSON array)
+    if (pluginHooks.entrypointCommands.length > 0) {
+      const encoded = Buffer.from(
+        JSON.stringify(pluginHooks.entrypointCommands),
+      ).toString('base64');
+      args.push('-e', `NANOCLAW_PLUGIN_COMMANDS=${encoded}`);
+    }
+
+    // MCP servers (base64-encoded JSON)
+    if (Object.keys(pluginHooks.mcpServers).length > 0) {
+      const encoded = Buffer.from(
+        JSON.stringify(pluginHooks.mcpServers),
+      ).toString('base64');
+      args.push('-e', `NANOCLAW_PLUGIN_MCP_SERVERS=${encoded}`);
+    }
+
+    // Allowed tools (comma-separated)
+    if (pluginHooks.allowedTools.length > 0) {
+      args.push(
+        '-e',
+        `NANOCLAW_PLUGIN_ALLOWED_TOOLS=${pluginHooks.allowedTools.join(',')}`,
+      );
+    }
+
+    // Plugin-declared env vars
+    for (const [key, value] of Object.entries(pluginHooks.envVars)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
+
   args.push(CONTAINER_IMAGE);
 
   return args;
@@ -275,10 +459,16 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const pluginHooks = resolveActivePlugins(group.containerConfig);
+  const mounts = buildVolumeMounts(
+    group,
+    input.isMain,
+    input.threadId,
+    pluginHooks,
+  );
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, pluginHooks);
 
   logger.debug(
     {

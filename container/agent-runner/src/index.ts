@@ -27,6 +27,7 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  threadId?: string;
 }
 
 interface ContainerOutput {
@@ -399,31 +400,55 @@ async function runQuery(
       systemPrompt: globalClaudeMd
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
         : undefined,
-      allowedTools: [
-        'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
-        'Task', 'TaskOutput', 'TaskStop',
-        'TeamCreate', 'TeamDelete', 'SendMessage',
-        'TodoWrite', 'ToolSearch', 'Skill',
-        'NotebookEdit',
-        'mcp__nanoclaw__*'
-      ],
+      allowedTools: (() => {
+        const tools = [
+          'Bash',
+          'Read', 'Write', 'Edit', 'Glob', 'Grep',
+          'WebSearch', 'WebFetch',
+          'Task', 'TaskOutput', 'TaskStop',
+          'TeamCreate', 'TeamDelete', 'SendMessage',
+          'TodoWrite', 'ToolSearch', 'Skill',
+          'NotebookEdit',
+          'mcp__nanoclaw__*',
+        ];
+        // Plugin-contributed tools
+        const pluginTools = process.env.NANOCLAW_PLUGIN_ALLOWED_TOOLS;
+        if (pluginTools) tools.push(...pluginTools.split(','));
+        return tools;
+      })(),
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+      mcpServers: (() => {
+        const servers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {
+          nanoclaw: {
+            command: 'node',
+            args: [mcpServerPath],
+            env: {
+              NANOCLAW_CHAT_JID: containerInput.chatJid,
+              NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+              NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+              NANOCLAW_THREAD_ID: containerInput.threadId || '',
+            },
           },
-        },
-      },
+        };
+        // Plugin-contributed MCP servers
+        const pluginMcpEnv = process.env.NANOCLAW_PLUGIN_MCP_SERVERS;
+        if (pluginMcpEnv) {
+          const pluginServers = JSON.parse(
+            Buffer.from(pluginMcpEnv, 'base64').toString('utf-8'),
+          ) as Record<string, { scriptPath: string; env?: Record<string, string> }>;
+          for (const [name, config] of Object.entries(pluginServers)) {
+            servers[name] = {
+              command: 'node',
+              args: [path.join(path.dirname(mcpServerPath), config.scriptPath)],
+              env: config.env || {},
+            };
+          }
+        }
+        return servers;
+      })(),
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
       },
