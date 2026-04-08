@@ -22,6 +22,8 @@ const capabilities: CapabilitiesConfig = {
   codeTasks: true,
   worktrees: true,
   gh: true,
+  azure: true,
+  appInsights: true,
 };
 
 export default capabilities;

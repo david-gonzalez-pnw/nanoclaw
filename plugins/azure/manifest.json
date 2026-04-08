@@ -1,0 +1,29 @@
+{
+  "name": "azure",
+  "description": "Azure CLI + azd — manage Azure resources, deploy infrastructure, provision environments",
+  "prerequisites": [
+    {
+      "type": "file",
+      "path": "~/.config/nanoclaw/azure-sp.json",
+      "description": "Azure service principal credentials (appId, password, tenant, subscriptionId)"
+    }
+  ],
+  "container": {
+    "mounts": [
+      {
+        "hostPath": "~/.config/nanoclaw/azure-sp.json",
+        "containerPath": "/secrets/azure-sp.json",
+        "readonly": true,
+        "condition": "prerequisite:0"
+      }
+    ],
+    "envVars": {},
+    "entrypointCommands": [
+      "if [ -f /secrets/azure-sp.json ]; then APP_ID=$(node -e \"console.log(JSON.parse(require('fs').readFileSync('/secrets/azure-sp.json','utf-8')).appId)\"); PASS=$(node -e \"console.log(JSON.parse(require('fs').readFileSync('/secrets/azure-sp.json','utf-8')).password)\"); TENANT=$(node -e \"console.log(JSON.parse(require('fs').readFileSync('/secrets/azure-sp.json','utf-8')).tenant)\"); az login --service-principal -u \"$APP_ID\" -p \"$PASS\" --tenant \"$TENANT\" 2>&1 >&2 || true; SUB=$(node -e \"const s=JSON.parse(require('fs').readFileSync('/secrets/azure-sp.json','utf-8')).subscriptionId; if(s) console.log(s)\"); [ -n \"$SUB\" ] && az account set --subscription \"$SUB\" 2>&1 >&2 || true; fi"
+    ],
+    "mcpServers": {},
+    "allowedTools": [],
+    "skills": []
+  },
+  "setupInstructions": "Create a service principal: `az ad sp create-for-rbac --name nanoclaw-coqui --role Contributor --scopes /subscriptions/{sub-id}` and save the output JSON (with added subscriptionId field) to ~/.config/nanoclaw/azure-sp.json"
+}

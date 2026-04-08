@@ -1,0 +1,34 @@
+{
+  "name": "appInsights",
+  "description": "Azure Application Insights MCP — query traces, exceptions, requests, and custom events via KQL",
+  "prerequisites": [
+    {
+      "type": "file",
+      "path": "~/.config/nanoclaw/azure-sp.json",
+      "description": "Azure service principal with Reader role on the App Insights resource"
+    }
+  ],
+  "container": {
+    "mounts": [
+      {
+        "hostPath": "~/.config/nanoclaw/azure-sp.json",
+        "containerPath": "/secrets/azure-sp.json",
+        "readonly": true,
+        "condition": "prerequisite:0"
+      }
+    ],
+    "envVars": {},
+    "entrypointCommands": [],
+    "mcpServers": {
+      "app_insights": {
+        "scriptPath": "app-insights-mcp.js",
+        "env": {
+          "AZURE_SP_PATH": "/secrets/azure-sp.json"
+        }
+      }
+    },
+    "allowedTools": ["mcp__app_insights__*"],
+    "skills": []
+  },
+  "setupInstructions": "Ensure the service principal in ~/.config/nanoclaw/azure-sp.json has Reader role on the Application Insights resource. Set the APP_INSIGHTS_APP_ID env var in the manifest or pass it via query parameters."
+}
