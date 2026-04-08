@@ -481,4 +481,180 @@ describe('GroupQueue', () => {
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  // --- Per-thread slot isolation ---
+
+  it('different threads in same group get independent containers', async () => {
+    const processed: string[] = [];
+    const completionCallbacks: Array<() => void> = [];
+
+    const processMessages = vi.fn(
+      async (_groupJid: string, threadId?: string) => {
+        processed.push(threadId || 'default');
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        return true;
+      },
+    );
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // Enqueue two different threads for the same group
+    queue.enqueueMessageCheck('group1', 'thread-A');
+    queue.enqueueMessageCheck('group1', 'thread-B');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Both should start concurrently (each gets its own slot)
+    expect(processed).toContain('thread-A');
+    expect(processed).toContain('thread-B');
+    expect(processMessages).toHaveBeenCalledTimes(2);
+
+    completionCallbacks.forEach((cb) => cb());
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('sendMessage routes to correct thread slot', async () => {
+    let resolveA: (() => void) | undefined;
+    let resolveB: (() => void) | undefined;
+
+    const processMessages = vi.fn(
+      async (_groupJid: string, threadId?: string) => {
+        await new Promise<void>((resolve) => {
+          if (threadId === 'thread-A') resolveA = () => resolve();
+          else resolveB = () => resolve();
+        });
+        return true;
+      },
+    );
+
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1', 'thread-A');
+    queue.enqueueMessageCheck('group1', 'thread-B');
+    await vi.advanceTimersByTimeAsync(10);
+
+    const mockProc = { killed: false } as import('child_process').ChildProcess;
+    queue.registerProcess(
+      'group1',
+      mockProc,
+      'container-A',
+      'folder1',
+      'thread-A',
+    );
+    queue.registerProcess(
+      'group1',
+      mockProc,
+      'container-B',
+      'folder1',
+      'thread-B',
+    );
+
+    // Pipe to thread A succeeds
+    expect(queue.sendMessage('group1', 'hello', 'thread-A')).toBe(true);
+
+    // Pipe to thread B succeeds (independent slot)
+    expect(queue.sendMessage('group1', 'hello', 'thread-B')).toBe(true);
+
+    // Pipe with no thread goes to default slot (not active) — fails
+    expect(queue.sendMessage('group1', 'hello')).toBe(false);
+
+    // Pipe to non-existent thread C — fails (no active slot)
+    expect(queue.sendMessage('group1', 'hello', 'thread-C')).toBe(false);
+
+    resolveA!();
+    resolveB!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('default slot works independently from thread slots', async () => {
+    const processed: string[] = [];
+    const completionCallbacks: Array<() => void> = [];
+
+    const processMessages = vi.fn(
+      async (_groupJid: string, threadId?: string) => {
+        processed.push(threadId || 'default');
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        return true;
+      },
+    );
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // Start a threaded container and a non-threaded one
+    queue.enqueueMessageCheck('group1', 'thread-A');
+    queue.enqueueMessageCheck('group1'); // default slot
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(processed).toContain('thread-A');
+    expect(processed).toContain('default');
+
+    completionCallbacks.forEach((cb) => cb());
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('thread slots respect global concurrency limit', async () => {
+    const completionCallbacks: Array<() => void> = [];
+    let activeCount = 0;
+    let maxActive = 0;
+
+    const processMessages = vi.fn(async () => {
+      activeCount++;
+      maxActive = Math.max(maxActive, activeCount);
+      await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+      activeCount--;
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // MAX_CONCURRENT_CONTAINERS = 2, try to start 3 threads
+    queue.enqueueMessageCheck('group1', 'thread-A');
+    queue.enqueueMessageCheck('group1', 'thread-B');
+    queue.enqueueMessageCheck('group1', 'thread-C');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(maxActive).toBe(2); // Only 2 can run
+    expect(processMessages).toHaveBeenCalledTimes(2);
+
+    // Free one slot — thread C should start
+    completionCallbacks[0]();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(processMessages).toHaveBeenCalledTimes(3);
+  });
+
+  it('slot state is cleared after container finishes', async () => {
+    const processMessages = vi.fn(async () => true);
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1', 'thread-A');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // After thread A finishes, a new container for thread A can start
+    let resolveProcess: (() => void) | undefined;
+    queue.setProcessMessagesFn(
+      vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveProcess = () => resolve(true);
+          }),
+      ),
+    );
+
+    queue.enqueueMessageCheck('group1', 'thread-A');
+    await vi.advanceTimersByTimeAsync(10);
+
+    const mockProc = { killed: false } as import('child_process').ChildProcess;
+    queue.registerProcess(
+      'group1',
+      mockProc,
+      'container-2',
+      'folder1',
+      'thread-A',
+    );
+
+    expect(queue.sendMessage('group1', 'hello', 'thread-A')).toBe(true);
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
 });

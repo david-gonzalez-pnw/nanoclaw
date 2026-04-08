@@ -9,9 +9,13 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+import {
+  extendWorktreeRetention,
+  removeWorktrees,
+} from './worktree-manager.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, threadId?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -81,9 +85,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  await deps.sendMessage(
+                    data.chatJid,
+                    data.text,
+                    data.threadId,
+                  );
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      threadId: data.threadId,
+                    },
                     'IPC message sent',
                   );
                 } else {
@@ -172,6 +184,9 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For worktree management
+    thread_ts?: string;
+    days?: number;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -452,6 +467,33 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'extend_worktree':
+      if (data.thread_ts && typeof data.days === 'number' && data.days > 0) {
+        extendWorktreeRetention(data.thread_ts, data.days);
+        logger.info(
+          { threadTs: data.thread_ts, days: data.days },
+          'Extended worktree retention via IPC',
+        );
+      } else {
+        logger.warn(
+          { data },
+          'extend_worktree requires thread_ts (string) and days (positive number)',
+        );
+      }
+      break;
+
+    case 'discard_worktree':
+      if (data.thread_ts) {
+        removeWorktrees(data.thread_ts);
+        logger.info(
+          { threadTs: data.thread_ts },
+          'Discarded worktrees via IPC',
+        );
+      } else {
+        logger.warn({ data }, 'discard_worktree requires thread_ts');
       }
       break;
 
