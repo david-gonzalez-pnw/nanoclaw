@@ -19,6 +19,8 @@ Declarative plugin architecture via `plugins/` manifests. Each plugin declares i
 | `gh` | GitHub CLI inside containers -- PRs, issues, code review. Reads token from `~/.config/nanoclaw/github-token` |
 | `gcloud` | Google Cloud CLI with service account auth |
 | `gcpLogging` | GCP Cloud Logging MCP server -- query logs from inside containers |
+| `azure` | Azure CLI + azd -- manage resources, deploy infrastructure. Authenticates via service principal |
+| `appInsights` | Azure Application Insights MCP server -- KQL queries for traces, exceptions, requests, and metrics |
 | `codeTasks` | Code task execution MCP server |
 | `worktrees` | Per-thread git worktree lifecycle management |
 
@@ -51,7 +53,7 @@ Full Slack integration via `@slack/bolt` Socket Mode:
 
 ### Container Enhancements
 
-- **Google Cloud CLI** and **GitHub CLI** installed in the container image
+- **Google Cloud CLI**, **Azure CLI**, and **GitHub CLI** installed in the container image
 - **Externalized entrypoint** (`container/entrypoint.sh`) with plugin command execution
 - **Dynamic MCP servers** -- plugins contribute MCP servers via base64-encoded env vars
 - **Dynamic allowed tools** -- plugins extend the tool allowlist
@@ -94,6 +96,7 @@ This fork reads plugin credentials from `~/.config/nanoclaw/`:
 |------|---------|
 | `github-token` | GitHub PAT for the `gh` plugin |
 | `gcp-service-account.json` | GCP service account for `gcloud` and `gcpLogging` plugins |
+| `azure-sp.json` | Azure service principal credentials (`appId`, `password`, `tenant`, `subscriptionId`) for `azure` and `appInsights` plugins |
 | `mount-allowlist.json` | Directories allowed to be mounted into containers |
 
 See `.env.example` for all environment variables.
