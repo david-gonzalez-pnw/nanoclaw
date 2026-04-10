@@ -42,7 +42,8 @@ export type PluginName =
   | 'worktrees'
   | 'gh'
   | 'azure'
-  | 'appInsights';
+  | 'appInsights'
+  | 'gchat';
 
 export type CapabilitiesConfig = Record<PluginName, boolean>;
 
@@ -63,10 +64,20 @@ export interface PluginMount {
   condition?: string;
 }
 
-export interface PluginMcpServer {
+export type PluginMcpServer = PluginMcpServerStdio | PluginMcpServerUrl;
+
+export interface PluginMcpServerStdio {
+  type?: 'stdio';
   /** Relative path to compiled .js file inside agent-runner dist dir */
   scriptPath: string;
   env?: Record<string, string>;
+}
+
+export interface PluginMcpServerUrl {
+  type: 'sse' | 'http';
+  /** URL to connect to. Use host.docker.internal for host-side servers. */
+  url: string;
+  headers?: Record<string, string>;
 }
 
 export interface PluginContainerConfig {
@@ -177,9 +188,14 @@ export interface Channel {
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
-  setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // For channels without a typing API (like GChat), this can be used to
+  // post a "noodling" placeholder message in the thread instead.
+  setTyping?(jid: string, isTyping: boolean, threadId?: string): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: fetch full thread context (parent + replies) from the platform.
+  // Used when a trigger arrives in a thread so the agent sees the full conversation.
+  fetchThreadContext?(jid: string, threadId: string): Promise<NewMessage[]>;
 }
 
 // Callback type that channels use to deliver inbound messages

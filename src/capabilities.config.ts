@@ -13,6 +13,7 @@ const DEFAULTS: CapabilitiesConfig = {
   gh: false,
   azure: false,
   appInsights: false,
+  gchat: false,
 };
 
 const capabilities: CapabilitiesConfig = {
@@ -24,6 +25,7 @@ const capabilities: CapabilitiesConfig = {
   gh: true,
   azure: true,
   appInsights: true,
+  gchat: true,
 };
 
 export default capabilities;

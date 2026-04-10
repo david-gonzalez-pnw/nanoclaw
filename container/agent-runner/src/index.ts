@@ -438,13 +438,27 @@ async function runQuery(
         if (pluginMcpEnv) {
           const pluginServers = JSON.parse(
             Buffer.from(pluginMcpEnv, 'base64').toString('utf-8'),
-          ) as Record<string, { scriptPath: string; env?: Record<string, string> }>;
+          ) as Record<string, {
+            type?: 'stdio' | 'sse' | 'http';
+            scriptPath?: string;
+            env?: Record<string, string>;
+            url?: string;
+            headers?: Record<string, string>;
+          }>;
           for (const [name, config] of Object.entries(pluginServers)) {
-            servers[name] = {
-              command: 'node',
-              args: [path.join(path.dirname(mcpServerPath), config.scriptPath)],
-              env: config.env || {},
-            };
+            if (config.type === 'sse' || config.type === 'http') {
+              servers[name] = {
+                type: config.type,
+                url: config.url!,
+                headers: config.headers,
+              } as any;
+            } else {
+              servers[name] = {
+                command: 'node',
+                args: [path.join(path.dirname(mcpServerPath), config.scriptPath!)],
+                env: config.env || {},
+              };
+            }
           }
         }
         return servers;

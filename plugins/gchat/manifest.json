@@ -1,0 +1,19 @@
+{
+  "name": "gchat",
+  "description": "Google Chat MCP — send messages, list spaces, search, and interact with Google Workspace Chat",
+  "prerequisites": [],
+  "container": {
+    "mounts": [],
+    "envVars": {},
+    "entrypointCommands": [],
+    "mcpServers": {
+      "gws_chat": {
+        "type": "sse",
+        "url": "http://host.docker.internal:3900/sse"
+      }
+    },
+    "allowedTools": ["mcp__gws_chat__*"],
+    "skills": []
+  },
+  "setupInstructions": "Run the GWS Chat MCP server on the host at localhost:3900 before starting NanoClaw. The container connects via host.docker.internal:3900/sse."
+}
