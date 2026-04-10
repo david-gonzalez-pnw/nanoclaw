@@ -1,9 +1,10 @@
 /**
  * GCP Cloud Logging MCP Server for NanoClaw
  * Provides tools for querying Google Cloud Logging from the container agent.
- * Credentials auto-discovered via GOOGLE_APPLICATION_CREDENTIALS env var.
+ * Supports multiple GCP environments via the GCP_ENVIRONMENTS env var.
  */
 
+import fs from 'fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Logging, Entry } from '@google-cloud/logging';
@@ -11,8 +12,70 @@ import { z } from 'zod';
 
 const DEFAULT_RESOURCE_TYPES = ['cloud_function', 'cloud_run_revision'];
 
-// SDK auto-discovers project ID and credentials from GOOGLE_APPLICATION_CREDENTIALS
-const logging = new Logging();
+// --- Multi-environment setup ---
+
+interface GcpEnvironment {
+  name: string;
+  logging: Logging;
+}
+
+const environments = new Map<string, GcpEnvironment>();
+
+// Parse GCP_ENVIRONMENTS mapping: { "name": "/path/to/sa.json", ... }
+const envMapping = process.env.GCP_ENVIRONMENTS;
+if (envMapping) {
+  const mapping: Record<string, string> = JSON.parse(envMapping);
+  for (const [name, saPath] of Object.entries(mapping)) {
+    if (fs.existsSync(saPath)) {
+      environments.set(name, {
+        name,
+        logging: new Logging({ keyFilename: saPath }),
+      });
+    }
+  }
+}
+
+// Backward compat: single-file mode via GOOGLE_APPLICATION_CREDENTIALS
+if (environments.size === 0 && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  const saPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (fs.existsSync(saPath)) {
+    environments.set('default', {
+      name: 'default',
+      logging: new Logging(),
+    });
+  }
+}
+
+const availableEnvs = [...environments.keys()];
+const envDescription = availableEnvs.length > 0
+  ? `GCP environment to query (${availableEnvs.join(' | ')}). ${
+      availableEnvs.length === 1
+        ? `Defaults to '${availableEnvs[0]}'.`
+        : 'Required when multiple environments are available.'
+    }`
+  : 'No GCP environments configured.';
+
+/**
+ * Resolve which environment to query.
+ */
+function resolveEnvironment(envParam?: string): GcpEnvironment {
+  if (environments.size === 0) {
+    throw new Error('No GCP environments configured. Ensure service account files are mounted.');
+  }
+  if (envParam) {
+    const env = environments.get(envParam);
+    if (!env) {
+      throw new Error(`Unknown environment: '${envParam}'. Available: ${availableEnvs.join(', ')}`);
+    }
+    return env;
+  }
+  if (environments.size === 1) {
+    return environments.values().next().value!;
+  }
+  throw new Error(`Multiple environments available (${availableEnvs.join(', ')}). Please specify which environment to query.`);
+}
+
+// --- Server setup ---
 
 const server = new McpServer({
   name: 'gcp_logging',
@@ -81,6 +144,7 @@ server.tool(
   'query_logs',
   'Query Google Cloud Logging entries. Filter by resource type, severity, text search, and time range. Returns recent log entries matching the criteria.',
   {
+    environment: z.string().optional().describe(envDescription),
     resource_type: z.string().optional().describe(
       'GCP resource type to filter (e.g. "cloud_function", "cloud_run_revision"). Defaults to cloud_function + cloud_run_revision. Use list_resource_types to discover available types.',
     ),
@@ -102,6 +166,7 @@ server.tool(
   },
   async (args) => {
     try {
+      const env = resolveEnvironment(args.environment);
       const since = parseTimeRange(args.time_range || '1h');
       const pageSize = Math.min(Math.max(args.limit || 50, 1), 500);
 
@@ -136,7 +201,7 @@ server.tool(
         filter = parts.join(' AND ');
       }
 
-      const [entries] = await logging.getEntries({
+      const [entries] = await env.logging.getEntries({
         filter,
         pageSize,
         orderBy: 'timestamp desc',
@@ -144,12 +209,12 @@ server.tool(
 
       if (entries.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: `No log entries found matching filter:\n${filter}` }],
+          content: [{ type: 'text' as const, text: `No log entries found in '${env.name}' matching filter:\n${filter}` }],
         };
       }
 
       const formatted = entries.map(formatEntry).join('\n\n---\n\n');
-      const header = `Found ${entries.length} log entries (filter: ${filter}):\n\n`;
+      const header = `Found ${entries.length} log entries in '${env.name}' (filter: ${filter}):\n\n`;
 
       return {
         content: [{ type: 'text' as const, text: header + formatted }],
@@ -169,24 +234,26 @@ server.tool(
   'get_log_entry',
   'Get the full details of a specific log entry by its insertId. Use this after query_logs to get complete stack traces and metadata.',
   {
+    environment: z.string().optional().describe(envDescription),
     insert_id: z.string().describe('The insertId of the log entry to retrieve'),
     resource_type: z.string().optional().describe('Resource type to narrow the search (optional)'),
   },
   async (args) => {
     try {
+      const env = resolveEnvironment(args.environment);
       let filter = `insertId = "${args.insert_id}"`;
       if (args.resource_type) {
         filter += ` AND resource.type = "${args.resource_type}"`;
       }
 
-      const [entries] = await logging.getEntries({
+      const [entries] = await env.logging.getEntries({
         filter,
         pageSize: 1,
       });
 
       if (entries.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: `No log entry found with insertId: ${args.insert_id}` }],
+          content: [{ type: 'text' as const, text: `No log entry found in '${env.name}' with insertId: ${args.insert_id}` }],
         };
       }
 
@@ -217,11 +284,14 @@ server.tool(
 server.tool(
   'list_resource_types',
   'List GCP resource types that have recent log entries. Useful for discovering what resource types are available to query.',
-  {},
-  async () => {
+  {
+    environment: z.string().optional().describe(envDescription),
+  },
+  async (args) => {
     try {
+      const env = resolveEnvironment(args.environment);
       const since = new Date(Date.now() - 60 * 60 * 1000); // Last hour
-      const [entries] = await logging.getEntries({
+      const [entries] = await env.logging.getEntries({
         filter: `timestamp >= "${since.toISOString()}"`,
         pageSize: 1000,
         orderBy: 'timestamp desc',
@@ -236,14 +306,14 @@ server.tool(
       const sorted = [...types].sort();
       if (sorted.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: 'No resource types found with recent log entries in the last hour.' }],
+          content: [{ type: 'text' as const, text: `No resource types found with recent log entries in '${env.name}' (last hour).` }],
         };
       }
 
       return {
         content: [{
           type: 'text' as const,
-          text: `Resource types with recent logs (last hour):\n\n${sorted.map(t => `- ${t}`).join('\n')}`,
+          text: `Resource types with recent logs in '${env.name}' (last hour):\n\n${sorted.map(t => `- ${t}`).join('\n')}`,
         }],
       };
     } catch (err) {

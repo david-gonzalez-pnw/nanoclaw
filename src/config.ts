@@ -6,7 +6,11 @@ import { readEnvFile } from './env.js';
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'CREDENTIAL_PROXY_PORT',
+]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -48,7 +52,9 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const CREDENTIAL_PROXY_PORT = parseInt(
-  process.env.CREDENTIAL_PROXY_PORT || '3001',
+  process.env.CREDENTIAL_PROXY_PORT ||
+    envConfig.CREDENTIAL_PROXY_PORT ||
+    '3001',
   10,
 );
 export const IPC_POLL_INTERVAL = 1000;
@@ -72,12 +78,34 @@ export const TRIGGER_PATTERN = new RegExp(
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-// GCP service account for Cloud Logging MCP tool (stored outside project root)
+// GCP service account for gcloud CLI plugin (stored outside project root)
 export const GCP_SERVICE_ACCOUNT_PATH = path.join(
   HOME_DIR,
   '.config',
   'nanoclaw',
   'gcp-service-account.json',
+);
+
+// GCP service accounts for multi-environment Cloud Logging MCP
+export const GCP_SA_PROD_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'nanoclaw-logs-reader-sa-prod.json',
+);
+export const GCP_SA_DEMO_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'nanoclaw-logs-reader-sa-demo.json',
+);
+
+// Default container config applied to ALL groups (merged with per-group overrides)
+export const DEFAULT_CONTAINER_CONFIG_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'default-container-config.json',
 );
 
 // Worktree cleanup: stale worktrees older than this are removed

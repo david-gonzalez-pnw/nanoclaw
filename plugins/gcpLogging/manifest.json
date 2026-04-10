@@ -1,20 +1,18 @@
 {
   "name": "gcpLogging",
-  "description": "GCP Cloud Logging MCP — query logs from Cloud Functions, Cloud Run, and other GCP services",
-  "prerequisites": [
-    {
-      "type": "file",
-      "path": "~/.config/nanoclaw/gcp-service-account.json",
-      "description": "GCP service account key file with Logs Viewer role"
-    }
-  ],
+  "description": "GCP Cloud Logging MCP — query logs from multiple GCP environments",
+  "prerequisites": [],
   "container": {
     "mounts": [
       {
-        "hostPath": "~/.config/nanoclaw/gcp-service-account.json",
-        "containerPath": "/secrets/gcp-service-account.json",
-        "readonly": true,
-        "condition": "prerequisite:0"
+        "hostPath": "~/.config/nanoclaw/nanoclaw-logs-reader-sa-prod.json",
+        "containerPath": "/secrets/gcp-sa-prod.json",
+        "readonly": true
+      },
+      {
+        "hostPath": "~/.config/nanoclaw/nanoclaw-logs-reader-sa-demo.json",
+        "containerPath": "/secrets/gcp-sa-demo.json",
+        "readonly": true
       }
     ],
     "envVars": {},
@@ -23,12 +21,12 @@
       "gcp_logging": {
         "scriptPath": "gcp-logging-mcp.js",
         "env": {
-          "GOOGLE_APPLICATION_CREDENTIALS": "/secrets/gcp-service-account.json"
+          "GCP_ENVIRONMENTS": "{\"prod\":\"/secrets/gcp-sa-prod.json\",\"demo\":\"/secrets/gcp-sa-demo.json\"}"
         }
       }
     },
     "allowedTools": ["mcp__gcp_logging__*"],
     "skills": []
   },
-  "setupInstructions": "Create a GCP service account with Logs Viewer role and download the JSON key to ~/.config/nanoclaw/gcp-service-account.json"
+  "setupInstructions": "Place GCP service account JSON files (Logs Viewer role) at the host paths declared in mounts. Edit GCP_ENVIRONMENTS to set environment names. The container-runner skips any SA files that don't exist on the host."
 }

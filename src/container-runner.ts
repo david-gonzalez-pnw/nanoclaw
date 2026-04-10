@@ -13,6 +13,7 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  DEFAULT_CONTAINER_CONFIG_PATH,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
@@ -29,12 +30,61 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { resolveActivePlugins } from './plugin-loader.js';
-import { RegisteredGroup } from './types.js';
+import { ContainerConfig, RegisteredGroup } from './types.js';
 import { getOrCreateWorktree } from './worktree-manager.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+let cachedDefaultConfig: ContainerConfig | null | undefined;
+
+/**
+ * Load the global default container config (e.g. additionalMounts applied to ALL groups).
+ * Cached after first read.
+ */
+function loadDefaultContainerConfig(): ContainerConfig | null {
+  if (cachedDefaultConfig !== undefined) return cachedDefaultConfig;
+  try {
+    if (fs.existsSync(DEFAULT_CONTAINER_CONFIG_PATH)) {
+      cachedDefaultConfig = JSON.parse(
+        fs.readFileSync(DEFAULT_CONTAINER_CONFIG_PATH, 'utf-8'),
+      );
+      logger.info(
+        { path: DEFAULT_CONTAINER_CONFIG_PATH },
+        'Loaded default container config',
+      );
+      return cachedDefaultConfig!;
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Failed to load default container config');
+  }
+  cachedDefaultConfig = null;
+  return null;
+}
+
+/**
+ * Merge default container config with per-group overrides.
+ * Per-group additionalMounts are appended after defaults (and can shadow by containerPath).
+ */
+function mergeContainerConfig(
+  groupConfig?: ContainerConfig,
+): ContainerConfig | undefined {
+  const defaults = loadDefaultContainerConfig();
+  if (!defaults) return groupConfig;
+  if (!groupConfig) return defaults;
+
+  const mergedMounts = [
+    ...(defaults.additionalMounts || []),
+    ...(groupConfig.additionalMounts || []),
+  ];
+
+  return {
+    ...defaults,
+    ...groupConfig,
+    additionalMounts: mergedMounts.length > 0 ? mergedMounts : undefined,
+  };
+}
 
 export interface ContainerInput {
   prompt: string;
@@ -459,9 +509,16 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const pluginHooks = resolveActivePlugins(group.containerConfig);
+  // Merge global default container config with per-group overrides
+  const mergedConfig = mergeContainerConfig(group.containerConfig);
+  const groupWithDefaults =
+    mergedConfig !== group.containerConfig
+      ? { ...group, containerConfig: mergedConfig }
+      : group;
+
+  const pluginHooks = resolveActivePlugins(groupWithDefaults.containerConfig);
   const mounts = buildVolumeMounts(
-    group,
+    groupWithDefaults,
     input.isMain,
     input.threadId,
     pluginHooks,
