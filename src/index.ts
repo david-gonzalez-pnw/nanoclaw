@@ -194,7 +194,30 @@ async function processGroupMessages(
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  // Fetch full thread context from the platform (parent + replies) so the
+  // agent sees the entire conversation, including bot/app messages like alerts
+  // that may not be in the local DB.
+  let allMessages = missedMessages;
+  if (threadId && channel.fetchThreadContext) {
+    try {
+      const threadMessages = await channel.fetchThreadContext(
+        chatJid,
+        threadId,
+      );
+      if (threadMessages.length > 0) {
+        // Merge: thread context first, then any missed messages not already present
+        const seenIds = new Set(threadMessages.map((m) => m.id));
+        const extra = missedMessages.filter((m) => !seenIds.has(m.id));
+        allMessages = [...threadMessages, ...extra].sort((a, b) =>
+          a.timestamp.localeCompare(b.timestamp),
+        );
+      }
+    } catch (err) {
+      logger.warn({ chatJid, threadId, err }, 'Failed to fetch thread context');
+    }
+  }
+
+  const prompt = formatMessages(allMessages, TIMEZONE);
 
   // Thread context: use the passed threadId directly, or fall back to
   // determining it from the triggered message in the batch
@@ -242,11 +265,11 @@ async function processGroupMessages(
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
   const effectiveThreadId = sendOptions?.threadId || threadId;
+  await channel.setTyping?.(chatJid, true, effectiveThreadId);
   const output = await runAgent(
     group,
     prompt,
@@ -280,7 +303,7 @@ async function processGroupMessages(
     },
   );
 
-  await channel.setTyping?.(chatJid, false);
+  await channel.setTyping?.(chatJid, false, effectiveThreadId);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -494,7 +517,7 @@ async function startMessageLoop(): Promise<void> {
             saveState();
             // Show typing indicator while the container processes the piped message
             channel
-              .setTyping?.(chatJid, true)
+              .setTyping?.(chatJid, true, pipeThreadId)
               ?.catch((err) =>
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
               );
