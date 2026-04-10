@@ -8,6 +8,7 @@ import os from 'os';
 import path from 'path';
 
 import {
+  CONTAINER_ALIAS,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -467,7 +468,8 @@ export async function runContainerAgent(
     pluginHooks,
   );
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  const prefix = CONTAINER_ALIAS ? `nanoclaw-${CONTAINER_ALIAS}` : 'nanoclaw';
+  const containerName = `${prefix}-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, pluginHooks);
 
   logger.debug(
