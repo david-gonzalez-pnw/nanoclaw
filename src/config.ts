@@ -10,6 +10,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'CREDENTIAL_PROXY_PORT',
+  'CONTAINER_ALIAS',
   'OLLAMA_URL',
   'OLLAMA_FORMATTER_MODEL',
 ]);
@@ -43,6 +44,8 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
+export const CONTAINER_ALIAS =
+  process.env.CONTAINER_ALIAS || envConfig.CONTAINER_ALIAS || '';
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(
