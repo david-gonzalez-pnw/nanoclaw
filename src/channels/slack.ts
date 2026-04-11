@@ -6,10 +6,9 @@ import type {
 } from '@slack/types';
 import fs from 'fs';
 import path from 'path';
-import { slackifyMarkdown } from 'slackify-markdown';
-
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
+import { formatForChannel } from '../formatter.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -54,6 +53,15 @@ export interface SlackChannelOpts {
 
 export class SlackChannel implements Channel {
   name = 'slack';
+  readonly formattingSpec = `Convert standard Markdown to Slack mrkdwn format:
+- Bold: **text** → *text*
+- Italic: *text* or _text_ → _text_
+- Strikethrough: ~~text~~ → ~text~
+- Inline code and code blocks: unchanged
+- Links: [text](url) → <url|text>
+- Bulleted lists: - item or * item → • item
+- Headers: # text → *text* (bold, no header syntax in Slack)
+- Blockquotes: > text → > text (unchanged)`;
 
   private app: App;
   private botToken: string;
@@ -327,7 +335,7 @@ export class SlackChannel implements Channel {
   ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     const threadTs = options?.threadId;
-    text = slackifyMarkdown(text);
+    text = await formatForChannel(text, this.formattingSpec);
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text, threadTs });

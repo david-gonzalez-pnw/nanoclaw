@@ -10,6 +10,8 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'CREDENTIAL_PROXY_PORT',
+  'OLLAMA_URL',
+  'OLLAMA_FORMATTER_MODEL',
 ]);
 
 export const ASSISTANT_NAME =
@@ -107,6 +109,14 @@ export const DEFAULT_CONTAINER_CONFIG_PATH = path.join(
   'nanoclaw',
   'default-container-config.json',
 );
+
+// Ollama for channel-agnostic message formatting
+export const OLLAMA_URL =
+  process.env.OLLAMA_URL || envConfig.OLLAMA_URL || 'http://localhost:11434';
+export const OLLAMA_FORMATTER_MODEL =
+  process.env.OLLAMA_FORMATTER_MODEL ||
+  envConfig.OLLAMA_FORMATTER_MODEL ||
+  'qwen3.5';
 
 // Worktree cleanup: stale worktrees older than this are removed
 export const WORKTREE_MAX_AGE_MS = parseInt(

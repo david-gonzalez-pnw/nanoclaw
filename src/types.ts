@@ -178,6 +178,8 @@ export interface TaskRunLog {
 
 export interface Channel {
   name: string;
+  /** Channel's formatting rules for the LLM formatter. If set, outbound messages are converted from markdown to this format. */
+  formattingSpec?: string;
   connect(): Promise<void>;
   sendMessage(
     jid: string,

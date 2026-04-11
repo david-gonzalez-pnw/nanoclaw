@@ -11,6 +11,7 @@ import { getRouterState, setRouterState } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { formatForChannel } from '../formatter.js';
 import { Channel, NewMessage, SendMessageOptions } from '../types.js';
 
 const POLL_CURSOR_KEY_PREFIX = 'gchat:poll_cursor:';
@@ -52,6 +53,14 @@ interface GChatSpace {
 
 export class GChatChannel implements Channel {
   readonly name = 'gchat';
+  readonly formattingSpec = `Convert standard Markdown to Google Chat format:
+- Bold: **text** → *text*
+- Italic: *text* → _text_
+- Strikethrough: ~~text~~ → ~text~
+- Inline code and code blocks: unchanged
+- Links: [text](url) → just paste the raw URL on its own line
+- Headers: # text → *text* (bold, no header syntax)
+- Horizontal rules: --- → (remove entirely)`;
 
   private client: Client | null = null;
   private transport: SSEClientTransport | null = null;
@@ -117,6 +126,7 @@ export class GChatChannel implements Channel {
     text: string,
     options?: SendMessageOptions,
   ): Promise<void> {
+    text = await formatForChannel(text, this.formattingSpec);
     const spaceName = jid.replace(/^gchat:/, '');
     const threadKey = options?.threadId;
 
