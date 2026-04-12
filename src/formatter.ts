@@ -75,8 +75,7 @@ OUTPUT:`,
 
     return formatted;
   } catch (err) {
-    const isAbort =
-      err instanceof Error && err.name === 'AbortError';
+    const isAbort = err instanceof Error && err.name === 'AbortError';
     logger.warn(
       { err: isAbort ? 'timeout' : err },
       'Ollama formatter unavailable, using raw text',
