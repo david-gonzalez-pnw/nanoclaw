@@ -17,35 +17,35 @@
  * src/session-manager.ts for the full set of cross-mount invariants and
  * scripts/sanity-live-poll.ts for the empirical validation.
  */
-import Database from 'better-sqlite3';
+import { Database } from 'bun:sqlite';
 import fs from 'fs';
 
 const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
 const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
 const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
 
-let _inbound: Database.Database | null = null;
-let _outbound: Database.Database | null = null;
+let _inbound: Database | null = null;
+let _outbound: Database | null = null;
 let _heartbeatPath: string = DEFAULT_HEARTBEAT_PATH;
 
 /** Inbound DB — container opens read-only (host is the sole writer). */
-export function getInboundDb(): Database.Database {
+export function getInboundDb(): Database {
   if (!_inbound) {
     const dbPath = process.env.SESSION_INBOUND_DB_PATH || DEFAULT_INBOUND_PATH;
     _inbound = new Database(dbPath, { readonly: true });
-    _inbound.pragma('busy_timeout = 5000');
+    _inbound.exec('PRAGMA busy_timeout = 5000');
   }
   return _inbound;
 }
 
 /** Outbound DB — container owns this file (sole writer). */
-export function getOutboundDb(): Database.Database {
+export function getOutboundDb(): Database {
   if (!_outbound) {
     const dbPath = process.env.SESSION_OUTBOUND_DB_PATH || DEFAULT_OUTBOUND_PATH;
     _outbound = new Database(dbPath);
-    _outbound.pragma('journal_mode = DELETE');
-    _outbound.pragma('busy_timeout = 5000');
-    _outbound.pragma('foreign_keys = ON');
+    _outbound.exec('PRAGMA journal_mode = DELETE');
+    _outbound.exec('PRAGMA busy_timeout = 5000');
+    _outbound.exec('PRAGMA foreign_keys = ON');
     // Lightweight forward-compat: session_state was added after the initial
     // v2 schema, so older session DBs don't have it. Create it on demand
     // instead of requiring a formal migration pass. Also handle the case
@@ -97,9 +97,9 @@ export function clearStaleProcessingAcks(): void {
 }
 
 /** For tests — creates in-memory DBs with the session schemas. */
-export function initTestSessionDb(): { inbound: Database.Database; outbound: Database.Database } {
+export function initTestSessionDb(): { inbound: Database; outbound: Database } {
   _inbound = new Database(':memory:');
-  _inbound.pragma('foreign_keys = ON');
+  _inbound.exec('PRAGMA foreign_keys = ON');
   _inbound.exec(`
     CREATE TABLE messages_in (
       id             TEXT PRIMARY KEY,
@@ -132,7 +132,7 @@ export function initTestSessionDb(): { inbound: Database.Database; outbound: Dat
   `);
 
   _outbound = new Database(':memory:');
-  _outbound.pragma('foreign_keys = ON');
+  _outbound.exec('PRAGMA foreign_keys = ON');
   _outbound.exec(`
     CREATE TABLE messages_out (
       id             TEXT PRIMARY KEY,
@@ -173,6 +173,6 @@ export function closeSessionDb(): void {
  * @deprecated Use getInboundDb() / getOutboundDb() instead.
  * Kept for backward compatibility during migration.
  */
-export function getSessionDb(): Database.Database {
+export function getSessionDb(): Database {
   return getInboundDb();
 }

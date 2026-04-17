@@ -1,77 +1,113 @@
+# syntax=docker/dockerfile:1.7
 # NanoClaw Agent Container
-# Runs Claude Agent SDK in isolated Linux VM with browser automation
+# Runs Claude Agent SDK in isolated Linux VM with browser automation.
+#
+# Runtime split:
+#   - agent-runner (our TypeScript code): Bun
+#   - globally-installed Node CLIs (claude-code, agent-browser, vercel): pnpm + Node
 
 FROM node:22-slim
 
-# Install system dependencies for Chromium
-RUN apt-get update && apt-get install -y \
-    chromium \
-    fonts-liberation \
-    fonts-noto-cjk \
-    fonts-noto-color-emoji \
-    libgbm1 \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libgtk-3-0 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxshmfence1 \
-    curl \
-    git \
+# ---- Build-time arguments ----------------------------------------------------
+# CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
+ARG INSTALL_CJK_FONTS=false
+
+# Pin CLI versions for reproducibility. Bump deliberately — unpinned installs
+# mean every rebuild silently picks up the latest and can break in lockstep
+# across all users.
+ARG CLAUDE_CODE_VERSION=2.1.112
+ARG AGENT_BROWSER_VERSION=latest
+ARG VERCEL_VERSION=latest
+ARG BUN_VERSION=1.3.12
+
+# ---- System dependencies -----------------------------------------------------
+# tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
+# SIGTERM instead of being orphaned by the shell entrypoint.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        chromium \
+        fonts-liberation \
+        fonts-noto-color-emoji \
+        libgbm1 \
+        libnss3 \
+        libatk-bridge2.0-0 \
+        libgtk-3-0 \
+        libx11-xcb1 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        libasound2 \
+        libpangocairo-1.0-0 \
+        libcups2 \
+        libdrm2 \
+        libxshmfence1 \
+        ca-certificates \
+        curl \
+        git \
+        tini \
+        unzip \
+    && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
+        apt-get install -y --no-install-recommends fonts-noto-cjk; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chromium path for agent-browser
+# Chromium path for agent-browser / Playwright consumers
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+# Belt-and-braces: prevent Playwright's postinstall from downloading its own
+# ~300MB Chromium. We've already installed the system one above.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# Enable pnpm via corepack
+# ---- Bun runtime -------------------------------------------------------------
+# Install via the official script (handles multi-arch detection), then move
+# the binary to /usr/local/bin so the non-root `node` user can execute it.
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
+    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
+    rm -rf /root/.bun
+
+# ---- pnpm + global Node CLIs -------------------------------------------------
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
-# Allow agent-browser build scripts for global install, then install
-RUN echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
-    pnpm install -g agent-browser @anthropic-ai/claude-code vercel
+# agent-browser has a postinstall build script — pnpm skips these by default.
+# Allowlist it via .npmrc so the install doesn't silently produce a broken
+# package. Pinned versions so every rebuild is reproducible.
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
+    pnpm install -g \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "agent-browser@${AGENT_BROWSER_VERSION}" \
+        "vercel@${VERCEL_VERSION}"
 
-# Create app directory
+# ---- agent-runner ------------------------------------------------------------
 WORKDIR /app
 
-# Copy package files first for better caching
-COPY agent-runner/package.json agent-runner/pnpm-lock.yaml agent-runner/pnpm-workspace.yaml ./
+# Copy manifest + lockfile first so the install layer caches independently of
+# source edits.
+COPY agent-runner/package.json agent-runner/bun.lock ./
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
 
-# Copy source code
+# Source. Bun runs TS directly — no tsc build step. The host remounts this
+# path at runtime via `src/container-runner.ts` so source edits on the host
+# take effect without rebuilding the image; the baked copy is the fallback.
 COPY agent-runner/ ./
 
-# Build TypeScript
-RUN pnpm run build
+# ---- Entrypoint --------------------------------------------------------------
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-# Create workspace directories
-RUN mkdir -p /workspace/group /workspace/global /workspace/extra
+# ---- Workspace + permissions -------------------------------------------------
+RUN mkdir -p /workspace/group /workspace/global /workspace/extra && \
+    chown -R node:node /workspace && \
+    chmod 755 /home/node
 
-# Create entrypoint script.
-# The host mounts container/agent-runner/src at /app/src and the entrypoint
-# recompiles on startup — this lets host source edits and skill installs
-# take effect without rebuilding the image. All IO goes through the session
-# DBs (inbound.db / outbound.db) mounted into /workspace.
-RUN printf '#!/bin/bash\nset -e\ncd /app && pnpm exec tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/node_modules /tmp/dist/node_modules\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
-# Set ownership to node user (non-root) for writable directories
-RUN chown -R node:node /workspace && chmod 777 /home/node
-
-# Switch to non-root user (required for --dangerously-skip-permissions)
 USER node
-
-# Set working directory to group workspace
 WORKDIR /workspace/group
 
-# Entry point reads JSON from stdin, outputs JSON to stdout
-ENTRYPOINT ["/app/entrypoint.sh"]
+# tini is PID 1, reaps zombies, forwards signals cleanly. entrypoint.sh does
+# `exec bun ...` so bun runs as tini's direct child.
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

@@ -289,17 +289,17 @@ async function buildContainerArgs(
     args.push('-e', `NANOCLAW_MCP_SERVERS=${JSON.stringify(containerConfig.mcpServers)}`);
   }
 
-  // Override entrypoint: compile agent-runner source, run v2 entry point (no stdin)
+  // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
+  // The image's ENTRYPOINT (tini → entrypoint.sh) handles the stdin-piped
+  // invocation path; the host-spawned sessions don't need stdin because all
+  // IO flows through the mounted session DBs.
   args.push('--entrypoint', 'bash');
 
   // Use per-agent-group image if one has been built, otherwise base image
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push(
-    '-c',
-    'cd /app && pnpm exec tsc --outDir /tmp/dist 2>&1 >&2 && ln -sf /app/node_modules /tmp/dist/node_modules && node /tmp/dist/index.js',
-  );
+  args.push('-c', 'exec bun run /app/src/index.ts');
 
   return args;
 }

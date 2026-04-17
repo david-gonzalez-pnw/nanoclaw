@@ -53,20 +53,24 @@ export function writeMessageOut(msg: WriteMessageOut): number {
   const max = Math.max(maxOut, maxIn);
   const nextSeq = max % 2 === 0 ? max + 1 : max + 2; // next odd
 
+  // bun:sqlite requires named parameters to be passed with the prefix character
+  // in the JS object keys (better-sqlite3 auto-stripped it, bun:sqlite does not).
   outbound
     .prepare(
       `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
-     VALUES (@id, @seq, @in_reply_to, datetime('now'), @deliver_after, @recurrence, @kind, @platform_id, @channel_type, @thread_id, @content)`,
+     VALUES ($id, $seq, $in_reply_to, datetime('now'), $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
     )
     .run({
-      in_reply_to: null,
-      deliver_after: null,
-      recurrence: null,
-      platform_id: null,
-      channel_type: null,
-      thread_id: null,
-      ...msg,
-      seq: nextSeq,
+      $id: msg.id,
+      $seq: nextSeq,
+      $in_reply_to: msg.in_reply_to ?? null,
+      $deliver_after: msg.deliver_after ?? null,
+      $recurrence: msg.recurrence ?? null,
+      $kind: msg.kind,
+      $platform_id: msg.platform_id ?? null,
+      $channel_type: msg.channel_type ?? null,
+      $thread_id: msg.thread_id ?? null,
+      $content: msg.content,
     });
 
   return nextSeq;
