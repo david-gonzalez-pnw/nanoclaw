@@ -25,7 +25,6 @@ import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
-import { normalizeName } from '../src/db/agent-destinations.js';
 import { initDb } from '../src/db/connection.js';
 import {
   createMessagingGroup,
@@ -34,8 +33,9 @@ import {
   getMessagingGroupByPlatform,
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
-import { grantRole, hasAnyOwner } from '../src/db/user-roles.js';
-import { upsertUser } from '../src/db/users.js';
+import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
+import { grantRole, hasAnyOwner } from '../src/modules/permissions/db/user-roles.js';
+import { upsertUser } from '../src/modules/permissions/db/users.js';
 import { initGroupFilesystem } from '../src/group-init.js';
 import { resolveSession, writeSessionMessage } from '../src/session-manager.js';
 import type { AgentGroup } from '../src/types.js';
@@ -224,12 +224,46 @@ async function main(): Promise<void> {
     }),
   });
 
+  // 6. Wire the CLI channel to the same agent so the user can `pnpm run chat`
+  // immediately. CLI ships with main and is always available — separate
+  // messaging_group from the DM channel, so the two don't share a session.
+  const CLI_PLATFORM_ID = 'local';
+  let cliMg = getMessagingGroupByPlatform('cli', CLI_PLATFORM_ID);
+  if (!cliMg) {
+    cliMg = {
+      id: generateId('mg'),
+      channel_type: 'cli',
+      platform_id: CLI_PLATFORM_ID,
+      name: 'Local CLI',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: now,
+    };
+    createMessagingGroup(cliMg);
+    console.log(`Created CLI messaging group: ${cliMg.id}`);
+  }
+  const existingCliMga = getMessagingGroupAgentByPair(cliMg.id, ag.id);
+  if (!existingCliMga) {
+    createMessagingGroupAgent({
+      id: generateId('mga'),
+      messaging_group_id: cliMg.id,
+      agent_group_id: ag.id,
+      trigger_rules: null,
+      response_scope: 'all',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now,
+    });
+    console.log(`Wired cli/${CLI_PLATFORM_ID} -> ${ag.id}`);
+  }
+
   console.log('');
   console.log('Init complete.');
   console.log(`  owner:   ${userId}${promotedToOwner ? ' (promoted on first owner)' : ''}`);
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
   console.log(`  channel: ${args.channel} ${platformId}`);
   console.log(`  session: ${session.id}`);
+  console.log(`  cli:     cli/${CLI_PLATFORM_ID} wired — try \`pnpm run chat hi\``);
   console.log('');
   console.log('Host sweep (<=60s) will wake the container and the agent will send the welcome DM.');
 }

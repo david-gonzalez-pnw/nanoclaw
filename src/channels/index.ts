@@ -1,6 +1,9 @@
-// Channel self-registration barrel file.
+// Channel self-registration barrel.
 // Each import triggers the channel module's registerChannelAdapter() call.
 //
-// v2 ships with no channels baked in. Channel skills (e.g. /add-slack-v2,
-// /add-discord-v2, /add-whatsapp-v2) copy the channel module from the
-// `channels` branch and append a self-registration import below.
+// Main ships with one default channel — `cli`, the always-on local-terminal
+// channel. Other channel skills (/add-slack, /add-discord, /add-whatsapp,
+// ...) copy their module from the `channels` branch and append a
+// self-registration import below.
+
+import './cli.js';
