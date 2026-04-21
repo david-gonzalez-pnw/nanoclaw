@@ -92,6 +92,22 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
+// Mock transcription so the real sidecar client isn't loaded during tests.
+// Tests override the return value per-case with transcribeAudioFileMock.
+const transcribeAudioFileMock = vi.hoisted(() => vi.fn());
+vi.mock('../transcription.js', () => ({
+  transcribeAudioFile: transcribeAudioFileMock,
+}));
+
+// Mock group-folder so file download tests don't need a real group dir on disk
+vi.mock('../group-folder.js', () => ({
+  resolveGroupFolderPath: vi.fn(
+    (folder: string) => `/tmp/test-groups/${folder}`,
+  ),
+}));
+
+import fs from 'fs';
+
 import { SlackChannel, SlackChannelOpts } from './slack.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
@@ -855,6 +871,254 @@ describe('SlackChannel', () => {
       // Both channels from both pages stored
       expect(updateChatName).toHaveBeenCalledWith('slack:C001', 'general');
       expect(updateChatName).toHaveBeenCalledWith('slack:C002', 'random');
+    });
+  });
+
+  // --- File attachments (images / audio / docs) ---
+
+  describe('file attachments', () => {
+    let mkdirSpy: any;
+    let writeSpy: any;
+    let fetchSpy: any;
+
+    beforeEach(() => {
+      mkdirSpy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
+      writeSpy = vi
+        .spyOn(fs, 'writeFileSync')
+        .mockImplementation(() => undefined);
+      fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(Buffer.from('filebytes'), { status: 200 }) as any,
+      );
+      transcribeAudioFileMock.mockReset();
+    });
+
+    afterEach(() => {
+      mkdirSpy.mockRestore();
+      writeSpy.mockRestore();
+      fetchSpy.mockRestore();
+    });
+
+    function fileShareEvent(files: any[], overrides: any = {}) {
+      return {
+        channel: 'C0123456789',
+        channel_type: 'channel',
+        user: 'U_USER_456',
+        text: 'check this',
+        ts: '1704067200.000000',
+        subtype: 'file_share',
+        files,
+        ...overrides,
+      };
+    }
+
+    it('embeds image files as [Attached image: ...] refs', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F1',
+            name: 'photo.png',
+            mimetype: 'image/png',
+            size: 1024,
+            url_private_download: 'https://slack/F1',
+          },
+        ]) as any,
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: expect.stringContaining(
+            '[Attached image: /workspace/group/uploads/slack-1704067200-000000-photo.png]',
+          ),
+        }),
+      );
+      expect(transcribeAudioFileMock).not.toHaveBeenCalled();
+    });
+
+    it('transcribes audio and embeds as [Voice: ...]', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      transcribeAudioFileMock.mockResolvedValue({
+        text: 'hello from the voice note',
+        duration: 3.2,
+        language: 'en',
+      });
+
+      const reactionsAdd = vi.fn().mockResolvedValue({});
+      const reactionsRemove = vi.fn().mockResolvedValue({});
+      currentApp().client.reactions = {
+        add: reactionsAdd,
+        remove: reactionsRemove,
+      };
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F2',
+            name: 'note.m4a',
+            mimetype: 'audio/m4a',
+            size: 2048,
+            url_private_download: 'https://slack/F2',
+          },
+        ]) as any,
+      );
+
+      expect(transcribeAudioFileMock).toHaveBeenCalledTimes(1);
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: expect.stringContaining('[Voice: hello from the voice note]'),
+        }),
+      );
+      // :ear: reaction bracketed the transcription
+      expect(reactionsAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'ear' }),
+      );
+      expect(reactionsRemove).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'ear' }),
+      );
+    });
+
+    it('falls back to unavailable marker when transcription returns null', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      transcribeAudioFileMock.mockResolvedValue(null);
+      currentApp().client.reactions = {
+        add: vi.fn().mockResolvedValue({}),
+        remove: vi.fn().mockResolvedValue({}),
+      };
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F3',
+            name: 'note.webm',
+            mimetype: 'audio/webm',
+            size: 4096,
+            url_private_download: 'https://slack/F3',
+          },
+        ]) as any,
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: expect.stringContaining(
+            '[Voice Message — transcription unavailable]',
+          ),
+        }),
+      );
+    });
+
+    it('embeds PDFs as [Attached file: ...] refs', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F4',
+            name: 'doc.pdf',
+            mimetype: 'application/pdf',
+            size: 10000,
+            url_private_download: 'https://slack/F4',
+          },
+        ]) as any,
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: expect.stringContaining(
+            '[Attached file: /workspace/group/uploads/slack-1704067200-000000-doc.pdf]',
+          ),
+        }),
+      );
+    });
+
+    it('skips unsupported file types silently', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F5',
+            name: 'archive.zip',
+            mimetype: 'application/zip',
+            size: 500,
+            url_private_download: 'https://slack/F5',
+          },
+        ]) as any,
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({ content: 'check this' }),
+      );
+      expect(transcribeAudioFileMock).not.toHaveBeenCalled();
+    });
+
+    it('does not add :ear: reaction when only images are attached', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const reactionsAdd = vi.fn().mockResolvedValue({});
+      currentApp().client.reactions = {
+        add: reactionsAdd,
+        remove: vi.fn().mockResolvedValue({}),
+      };
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F6',
+            name: 'pic.jpg',
+            mimetype: 'image/jpeg',
+            size: 1024,
+            url_private_download: 'https://slack/F6',
+          },
+        ]) as any,
+      );
+
+      expect(reactionsAdd).not.toHaveBeenCalled();
+    });
+
+    it('skips audio over the size cap', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      currentApp().client.reactions = {
+        add: vi.fn().mockResolvedValue({}),
+        remove: vi.fn().mockResolvedValue({}),
+      };
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F7',
+            name: 'huge.mp3',
+            mimetype: 'audio/mpeg',
+            size: 600 * 1024 * 1024, // above MAX_AUDIO_SIZE (500MB)
+            url_private_download: 'https://slack/F7',
+          },
+        ]) as any,
+      );
+
+      expect(transcribeAudioFileMock).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
   });
 

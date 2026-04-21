@@ -1,0 +1,6 @@
+faster-whisper==1.2.0
+# faster-whisper 1.2.0 imports `requests` but doesn't declare it — pin explicitly
+requests>=2.32
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.21.0.82
+nvidia-cuda-nvrtc-cu12==12.9.86

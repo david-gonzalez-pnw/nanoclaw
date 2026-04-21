@@ -19,9 +19,13 @@ const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } },
 });
 
-// Cache the allowlist in memory - only reloads on process restart
+// Cache the allowlist in memory. On success, cached permanently.
+// On failure, retries after RETRY_INTERVAL_MS so the file can be
+// created or fixed without requiring a process restart.
+const RETRY_INTERVAL_MS = 60_000;
 let cachedAllowlist: MountAllowlist | null = null;
 let allowlistLoadError: string | null = null;
+let lastFailureTime = 0;
 
 /**
  * Default blocked patterns - paths that should never be mounted
@@ -49,7 +53,8 @@ const DEFAULT_BLOCKED_PATTERNS = [
 /**
  * Load the mount allowlist from the external config location.
  * Returns null if the file doesn't exist or is invalid.
- * Result is cached in memory for the lifetime of the process.
+ * Successful loads are cached permanently. Failed loads are retried
+ * after RETRY_INTERVAL_MS so the file can be created without a restart.
  */
 export function loadMountAllowlist(): MountAllowlist | null {
   if (cachedAllowlist !== null) {
@@ -57,13 +62,18 @@ export function loadMountAllowlist(): MountAllowlist | null {
   }
 
   if (allowlistLoadError !== null) {
-    // Already tried and failed, don't spam logs
-    return null;
+    // Retry after interval so a newly-created file gets picked up
+    if (Date.now() - lastFailureTime < RETRY_INTERVAL_MS) {
+      return null;
+    }
+    // Reset error state and retry
+    allowlistLoadError = null;
   }
 
   try {
     if (!fs.existsSync(MOUNT_ALLOWLIST_PATH)) {
       allowlistLoadError = `Mount allowlist not found at ${MOUNT_ALLOWLIST_PATH}`;
+      lastFailureTime = Date.now();
       logger.warn(
         { path: MOUNT_ALLOWLIST_PATH },
         'Mount allowlist not found - additional mounts will be BLOCKED. ' +
@@ -107,6 +117,7 @@ export function loadMountAllowlist(): MountAllowlist | null {
     return cachedAllowlist;
   } catch (err) {
     allowlistLoadError = err instanceof Error ? err.message : String(err);
+    lastFailureTime = Date.now();
     logger.error(
       {
         path: MOUNT_ALLOWLIST_PATH,

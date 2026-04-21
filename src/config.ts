@@ -63,6 +63,24 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   10,
 );
 export const IPC_POLL_INTERVAL = 1000;
+
+// Transcription sidecar (Python + faster-whisper, keeps model resident in GPU)
+export const TRANSCRIPTION_ENABLED =
+  process.env.TRANSCRIPTION_ENABLED !== 'false';
+export const TRANSCRIPTION_PORT = parseInt(
+  process.env.TRANSCRIPTION_PORT || '3003',
+  10,
+);
+export const TRANSCRIPTION_MODEL =
+  process.env.TRANSCRIPTION_MODEL || 'large-v3-turbo';
+export const TRANSCRIPTION_DEVICE =
+  process.env.TRANSCRIPTION_DEVICE || 'cuda';
+// Max seconds to wait for the sidecar to become healthy after spawn.
+// Model load is ~40s first time (GPU-resident after), +download on first ever run.
+export const TRANSCRIPTION_STARTUP_TIMEOUT = parseInt(
+  process.env.TRANSCRIPTION_STARTUP_TIMEOUT || '600000',
+  10,
+);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,

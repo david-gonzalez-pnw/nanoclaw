@@ -28,8 +28,9 @@ export function startJobScheduler(): void {
     jobs: [
       {
         name: 'worktree-cleanup',
-        // Bree runs .js files in worker threads — point to compiled output
-        path: path.join(__dirname, 'jobs', 'worktree-cleanup.js'),
+        // Bree runs .js files in worker threads — point to compiled output.
+        // Use dist/ relative to project root so this works under both tsx and node.
+        path: path.join(process.cwd(), 'dist', 'jobs', 'worktree-cleanup.js'),
         cron: WORKTREE_CLEANUP_CRON,
         worker: {
           workerData: { dbPath, maxAgeMs: WORKTREE_MAX_AGE_MS },

@@ -12,6 +12,7 @@ import { formatForChannel } from '../formatter.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
+import { transcribeAudioFile } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -25,16 +26,44 @@ import {
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
 
-// Image MIME types we support for multimodal processing
+// Supported MIME types by category. Each category has its own delivery path:
+//   IMAGE — downloaded, path embedded as [Attached image: ...] for the agent's Read tool
+//   AUDIO — downloaded, transcribed by the sidecar, text embedded as [Voice: ...]
+//   DOC   — downloaded, path embedded as [Attached file: ...] for the agent's Read tool
 const IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
 ]);
+const AUDIO_MIME_PREFIXES = ['audio/'];
+const DOC_MIME_TYPES = new Set([
+  'application/pdf',
+  'text/plain',
+  'text/markdown',
+]);
 
-// Max image file size to download (10 MB)
+// Per-category size caps
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+const MAX_AUDIO_SIZE = 500 * 1024 * 1024; // sidecar caps compute time, not download
+const MAX_DOC_SIZE = 25 * 1024 * 1024;
+
+type SlackFile = {
+  id: string;
+  name: string | null;
+  mimetype: string;
+  size: number;
+  url_private_download?: string;
+};
+
+type FileCategory = 'image' | 'audio' | 'doc' | 'unsupported';
+
+function categorize(mime: string): FileCategory {
+  if (IMAGE_MIME_TYPES.has(mime)) return 'image';
+  if (AUDIO_MIME_PREFIXES.some((p) => mime.startsWith(p))) return 'audio';
+  if (DOC_MIME_TYPES.has(mime)) return 'doc';
+  return 'unsupported';
+}
 
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined), bot messages
@@ -171,22 +200,21 @@ export class SlackChannel implements Channel {
         }
       }
 
-      // Download attached images and save to the group's uploads directory.
-      // The container agent can read these via its multimodal Read tool.
+      // Download and process attached files. Images/docs become [Attached ...: path]
+      // refs for the agent's Read tool; audio is transcribed inline as [Voice: ...].
       const files = (msg as FileShareMessageEvent).files;
       if (files && !isBotMessage) {
         const group = groups[jid];
         if (group) {
-          const savedPaths = await this.downloadSlackFiles(
+          const refs = await this.downloadSlackFiles(
             files,
             group.folder,
             msg.ts,
+            msg.channel,
           );
-          if (savedPaths.length > 0) {
-            const refs = savedPaths
-              .map((p) => `[Attached image: ${p}]`)
-              .join('\n');
-            content = content ? `${content}\n${refs}` : refs;
+          if (refs.length > 0) {
+            const joined = refs.join('\n');
+            content = content ? `${content}\n${joined}` : joined;
           }
         }
       }
@@ -262,22 +290,21 @@ export class SlackChannel implements Channel {
         // Auto-prepend trigger — assistant messages are always directed at the bot
         let content = `@${ASSISTANT_NAME} ${msg.text || ''}`;
 
-        // Download attached images (same as channel handler)
+        // Download attached files (same as channel handler — images, audio, docs)
         const files = (msg as unknown as FileShareMessageEvent).files;
         if (files) {
           const groups = this.opts.registeredGroups();
           const group = groups[jid];
           if (group) {
-            const savedPaths = await this.downloadSlackFiles(
+            const refs = await this.downloadSlackFiles(
               files,
               group.folder,
               msg.ts,
+              msg.channel,
             );
-            if (savedPaths.length > 0) {
-              const refs = savedPaths
-                .map((p) => `[Attached image: ${p}]`)
-                .join('\n');
-              content = content ? `${content}\n${refs}` : refs;
+            if (refs.length > 0) {
+              const joined = refs.join('\n');
+              content = content ? `${content}\n${joined}` : joined;
             }
           }
         }
@@ -581,29 +608,23 @@ export class SlackChannel implements Channel {
   }
 
   /**
-   * Download image files from a Slack message and save to the group's uploads directory.
-   * Returns container-relative paths (e.g. /workspace/group/uploads/slack-123-screenshot.png)
-   * that the agent can read using the multimodal Read tool.
+   * Download supported files from a Slack message and return strings ready to
+   * append to the message content. Each returned string is either a path
+   * reference (images/docs) that the agent reads via its multimodal Read tool,
+   * or an inline transcript (audio). Files that are unsupported, too large, or
+   * missing a download URL are skipped silently.
+   *
+   * For audio files, a :ear: reaction is added to the source message while
+   * transcription is running and removed on completion (success or failure).
    */
   private async downloadSlackFiles(
-    files: Array<{
-      id: string;
-      name: string | null;
-      mimetype: string;
-      size: number;
-      url_private_download?: string;
-    }>,
+    files: SlackFile[],
     groupFolder: string,
     messageTs: string,
+    channelId: string,
   ): Promise<string[]> {
-    const imageFiles = files.filter(
-      (f) =>
-        IMAGE_MIME_TYPES.has(f.mimetype) &&
-        f.size <= MAX_IMAGE_SIZE &&
-        f.url_private_download,
-    );
-
-    if (imageFiles.length === 0) return [];
+    const withDownloadUrl = files.filter((f) => f.url_private_download);
+    if (withDownloadUrl.length === 0) return [];
 
     let groupDir: string;
     try {
@@ -615,46 +636,146 @@ export class SlackChannel implements Channel {
     const uploadsDir = path.join(groupDir, 'uploads');
     fs.mkdirSync(uploadsDir, { recursive: true });
 
-    const savedPaths: string[] = [];
+    const results: string[] = [];
     const safeMsgTs = messageTs.replace(/\./g, '-');
+    const hasAudio = withDownloadUrl.some(
+      (f) => categorize(f.mimetype) === 'audio',
+    );
 
-    for (const file of imageFiles) {
-      try {
-        const ext =
-          file.name?.split('.').pop() || file.mimetype.split('/')[1] || 'png';
-        const safeName = (file.name || `image.${ext}`)
-          .replace(/[^a-zA-Z0-9._-]/g, '_')
-          .slice(0, 100);
-        const filename = `slack-${safeMsgTs}-${safeName}`;
-        const hostPath = path.join(uploadsDir, filename);
+    if (hasAudio) {
+      await this.addReaction(channelId, messageTs, 'ear');
+    }
 
-        const response = await fetch(file.url_private_download!, {
-          headers: { Authorization: `Bearer ${this.botToken}` },
-        });
+    try {
+      for (const file of withDownloadUrl) {
+        const category = categorize(file.mimetype);
+        if (category === 'unsupported') continue;
 
-        if (!response.ok) {
+        const cap =
+          category === 'image'
+            ? MAX_IMAGE_SIZE
+            : category === 'audio'
+              ? MAX_AUDIO_SIZE
+              : MAX_DOC_SIZE;
+        if (file.size > cap) {
           logger.warn(
-            { fileId: file.id, status: response.status },
-            'Failed to download Slack file',
+            { fileId: file.id, size: file.size, cap, category },
+            'Slack attachment exceeds size cap, skipping',
           );
           continue;
         }
 
-        const buffer = Buffer.from(await response.arrayBuffer());
-        fs.writeFileSync(hostPath, buffer);
-
-        // Return the container-relative path
-        savedPaths.push(`/workspace/group/uploads/${filename}`);
-        logger.info(
-          { fileId: file.id, filename, size: buffer.length },
-          'Downloaded Slack image attachment',
+        const downloaded = await this.downloadOne(
+          file,
+          uploadsDir,
+          safeMsgTs,
+          category,
         );
-      } catch (err) {
-        logger.warn({ fileId: file.id, err }, 'Error downloading Slack file');
+        if (!downloaded) continue;
+
+        const { hostPath, filename } = downloaded;
+        const containerPath = `/workspace/group/uploads/${filename}`;
+
+        if (category === 'image') {
+          results.push(`[Attached image: ${containerPath}]`);
+        } else if (category === 'doc') {
+          results.push(`[Attached file: ${containerPath}]`);
+        } else {
+          const result = await transcribeAudioFile(hostPath);
+          if (result && result.text) {
+            results.push(`[Voice: ${result.text}]`);
+          } else {
+            results.push('[Voice Message — transcription unavailable]');
+          }
+        }
+      }
+    } finally {
+      if (hasAudio) {
+        await this.removeReaction(channelId, messageTs, 'ear');
       }
     }
 
-    return savedPaths;
+    return results;
+  }
+
+  private async downloadOne(
+    file: SlackFile,
+    uploadsDir: string,
+    safeMsgTs: string,
+    category: FileCategory,
+  ): Promise<{ hostPath: string; filename: string } | null> {
+    try {
+      const ext =
+        file.name?.split('.').pop() || file.mimetype.split('/')[1] || 'bin';
+      const fallback =
+        category === 'image'
+          ? `image.${ext}`
+          : category === 'audio'
+            ? `audio.${ext}`
+            : `file.${ext}`;
+      const safeName = (file.name || fallback)
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+        .slice(0, 100);
+      const filename = `slack-${safeMsgTs}-${safeName}`;
+      const hostPath = path.join(uploadsDir, filename);
+
+      const response = await fetch(file.url_private_download!, {
+        headers: { Authorization: `Bearer ${this.botToken}` },
+      });
+
+      if (!response.ok) {
+        logger.warn(
+          { fileId: file.id, status: response.status },
+          'Failed to download Slack file',
+        );
+        return null;
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      fs.writeFileSync(hostPath, buffer);
+
+      logger.info(
+        { fileId: file.id, filename, size: buffer.length, category },
+        'Downloaded Slack attachment',
+      );
+      return { hostPath, filename };
+    } catch (err) {
+      logger.warn({ fileId: file.id, err }, 'Error downloading Slack file');
+      return null;
+    }
+  }
+
+  private async addReaction(
+    channelId: string,
+    messageTs: string,
+    name: string,
+  ): Promise<void> {
+    try {
+      await this.app.client.reactions.add({
+        channel: channelId,
+        timestamp: messageTs,
+        name,
+      });
+    } catch (err) {
+      // already_reacted is fine; anything else we log quietly
+      logger.debug({ err, name, messageTs }, 'reactions.add failed');
+    }
+  }
+
+  private async removeReaction(
+    channelId: string,
+    messageTs: string,
+    name: string,
+  ): Promise<void> {
+    try {
+      await this.app.client.reactions.remove({
+        channel: channelId,
+        timestamp: messageTs,
+        name,
+      });
+    } catch (err) {
+      logger.debug({ err, name, messageTs }, 'reactions.remove failed');
+    }
   }
 
   private async resolveUserName(userId: string): Promise<string | undefined> {

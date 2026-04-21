@@ -59,6 +59,10 @@ import {
 import { startJobScheduler, stopJobScheduler } from './job-scheduler.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import {
+  startTranscriptionService,
+  stopTranscriptionService,
+} from './transcription.js';
+import {
   Channel,
   NewMessage,
   RegisteredGroup,
@@ -587,6 +591,14 @@ async function main(): Promise<void> {
     PROXY_BIND_HOST,
   );
 
+  // Start transcription sidecar in parallel with the rest of init —
+  // model load takes ~40s the first time, so we don't await it here.
+  // Channels that use transcription (Slack audio) will degrade gracefully
+  // if a message arrives before it's ready.
+  startTranscriptionService().catch((err) => {
+    logger.warn({ err }, 'Transcription sidecar failed to start');
+  });
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
@@ -594,6 +606,7 @@ async function main(): Promise<void> {
     await stopJobScheduler();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
+    await stopTranscriptionService();
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
