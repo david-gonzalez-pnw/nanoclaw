@@ -162,6 +162,60 @@ function createSchema(database: Database.Database): void {
       PRIMARY KEY (thread_ts, repo_host_path)
     )
   `);
+
+  // Product Input Facilitator tables
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS pi_sessions (
+      key TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pi_sessions_expires ON pi_sessions(expires_at);
+
+    CREATE TABLE IF NOT EXISTS pi_pr_state (
+      pr_number INTEGER PRIMARY KEY,
+      thread_ts TEXT,
+      notified_at INTEGER,
+      sla_48h_warned_at INTEGER,
+      blocking_sync_requested_at INTEGER,
+      resolved_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS pi_questions (
+      pr_number INTEGER NOT NULL,
+      pi_key TEXT NOT NULL,
+      pi_id TEXT NOT NULL,
+      rfc_slug TEXT NOT NULL,
+      title TEXT,
+      context TEXT,
+      question TEXT,
+      eng_rec TEXT NOT NULL,
+      blocking INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (pr_number, pi_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS pi_answers (
+      pr_number INTEGER NOT NULL,
+      pi_key TEXT NOT NULL,
+      answered_by TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      answer_text TEXT NOT NULL,
+      reasoning TEXT,
+      github_login TEXT,
+      answered_at INTEGER NOT NULL,
+      PRIMARY KEY (pr_number, pi_key, answered_by)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pi_answers_pr ON pi_answers(pr_number);
+
+    CREATE TABLE IF NOT EXISTS pi_tiebreaks (
+      pr_number INTEGER NOT NULL,
+      pi_key TEXT NOT NULL,
+      announcement_ts TEXT NOT NULL,
+      detected_at INTEGER NOT NULL,
+      resolved_at INTEGER,
+      PRIMARY KEY (pr_number, pi_key)
+    );
+  `);
 }
 
 export function initDatabase(): void {

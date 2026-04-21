@@ -448,6 +448,12 @@ export class SlackChannel implements Channel {
     return this.connected;
   }
 
+  /** Expose the underlying Bolt App so integrations can attach their own
+   *  action/view/command handlers after connect(). */
+  getApp(): App {
+    return this.app;
+  }
+
   ownsJid(jid: string): boolean {
     return jid.startsWith('slack:');
   }

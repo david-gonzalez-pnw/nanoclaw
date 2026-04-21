@@ -57,6 +57,10 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startJobScheduler, stopJobScheduler } from './job-scheduler.js';
+import {
+  initProductInput,
+  shutdownProductInput,
+} from './integrations/product-input/index.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import {
   startTranscriptionService,
@@ -602,6 +606,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    shutdownProductInput();
     proxyServer.close();
     await stopJobScheduler();
     await queue.shutdown(10000);
@@ -714,6 +719,17 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  // Product Input Facilitator — reuses the Slack channel's Bolt App
+  // for slash commands, button clicks, and view submissions (all via Socket Mode).
+  const slackChannel = channels.find(
+    (ch) => ch.name === 'slack',
+  ) as (typeof channels)[number] & {
+    getApp?: () => import('@slack/bolt').App;
+  };
+  if (slackChannel?.getApp) {
+    await initProductInput({ slackApp: slackChannel.getApp() });
   }
 
   // Start subsystems (independently of connection handler)
