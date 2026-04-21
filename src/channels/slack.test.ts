@@ -886,9 +886,11 @@ describe('SlackChannel', () => {
       writeSpy = vi
         .spyOn(fs, 'writeFileSync')
         .mockImplementation(() => undefined);
-      fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        new Response(Buffer.from('filebytes'), { status: 200 }) as any,
-      );
+      fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(
+          new Response(Buffer.from('filebytes'), { status: 200 }) as any,
+        );
       transcribeAudioFileMock.mockReset();
     });
 
@@ -973,7 +975,9 @@ describe('SlackChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'slack:C0123456789',
         expect.objectContaining({
-          content: expect.stringContaining('[Voice: hello from the voice note]'),
+          content: expect.stringContaining(
+            '[Voice: hello from the voice note]',
+          ),
         }),
       );
       // :ear: reaction bracketed the transcription
@@ -1119,6 +1123,120 @@ describe('SlackChannel', () => {
 
       expect(transcribeAudioFileMock).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- Auto-register on bot join ---
+
+  describe('auto-register on bot join', () => {
+    function setupJoinApp(app: any) {
+      app.client.conversations.info = vi.fn().mockResolvedValue({
+        channel: { name: 'new-channel' },
+      });
+      app.client.conversations.history = vi
+        .fn()
+        .mockResolvedValue({ messages: [] });
+    }
+
+    it('registers the channel when the bot itself joins', async () => {
+      const onRegisterGroup = vi.fn();
+      const opts = createTestOpts({ onRegisterGroup });
+      const channel = new SlackChannel(opts);
+      await channel.connect(); // sets botUserId to 'U_BOT_123'
+
+      setupJoinApp(currentApp());
+
+      const handler = currentApp().eventHandlers.get('member_joined_channel');
+      expect(handler).toBeDefined();
+      await handler!({
+        event: { user: 'U_BOT_123', channel: 'C_NEW_999' },
+      });
+
+      expect(onRegisterGroup).toHaveBeenCalledWith(
+        'slack:C_NEW_999',
+        expect.objectContaining({
+          name: 'new-channel',
+          folder: 'slack_new-channel',
+          requiresTrigger: true,
+        }),
+      );
+    });
+
+    it('ignores joins by other users', async () => {
+      const onRegisterGroup = vi.fn();
+      const opts = createTestOpts({ onRegisterGroup });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      setupJoinApp(currentApp());
+
+      const handler = currentApp().eventHandlers.get('member_joined_channel');
+      await handler!({
+        event: { user: 'U_SOMEONE_ELSE', channel: 'C_NEW_999' },
+      });
+
+      expect(onRegisterGroup).not.toHaveBeenCalled();
+    });
+
+    it('backfills recent history on auto-register', async () => {
+      const onMessage = vi.fn();
+      const onRegisterGroup = vi.fn();
+      const opts = createTestOpts({ onMessage, onRegisterGroup });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      setupJoinApp(currentApp());
+      // Slack's conversations.history returns newest-first; the handler
+      // reverses into chronological order before forwarding to onMessage.
+      currentApp().client.conversations.history = vi.fn().mockResolvedValue({
+        messages: [
+          { ts: '1704067201.000001', user: 'U_USER', text: 'newer' },
+          { ts: '1704067200.000001', user: 'U_USER', text: 'older' },
+        ],
+      });
+
+      const handler = currentApp().eventHandlers.get('member_joined_channel');
+      await handler!({
+        event: { user: 'U_BOT_123', channel: 'C_NEW_999' },
+      });
+
+      expect(onMessage).toHaveBeenCalledTimes(2);
+      expect(onMessage).toHaveBeenNthCalledWith(
+        1,
+        'slack:C_NEW_999',
+        expect.objectContaining({ content: 'older' }),
+      );
+      expect(onMessage).toHaveBeenNthCalledWith(
+        2,
+        'slack:C_NEW_999',
+        expect.objectContaining({ content: 'newer' }),
+      );
+    });
+
+    it('does not re-register an already-registered channel', async () => {
+      const onRegisterGroup = vi.fn();
+      const opts = createTestOpts({
+        onRegisterGroup,
+        registeredGroups: vi.fn(() => ({
+          'slack:C_NEW_999': {
+            name: 'already-registered',
+            folder: 'slack_already-registered',
+            trigger: '@Jonesy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      setupJoinApp(currentApp());
+
+      const handler = currentApp().eventHandlers.get('member_joined_channel');
+      await handler!({
+        event: { user: 'U_BOT_123', channel: 'C_NEW_999' },
+      });
+
+      expect(onRegisterGroup).not.toHaveBeenCalled();
     });
   });
 

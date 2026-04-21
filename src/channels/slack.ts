@@ -139,6 +139,18 @@ export class SlackChannel implements Channel {
   }
 
   private setupEventHandlers(): void {
+    // Auto-register any channel the bot is invited to. Intent is clear: if
+    // you add the bot to a channel, you want it to respond there. We also
+    // back-fill recent history so messages sent in the gap between the invite
+    // and the bot acknowledging it aren't silently dropped.
+    this.app.event('member_joined_channel', async ({ event }) => {
+      const joined = (event as { user?: string; channel?: string }).user;
+      const channelId = (event as { user?: string; channel?: string }).channel;
+      if (!channelId) return;
+      if (!this.botUserId || joined !== this.botUserId) return;
+      await this.autoRegisterChannel(channelId);
+    });
+
     // Use app.event('message') instead of app.message() to capture all
     // message subtypes including bot_message (needed to track our own output)
     this.app.event('message', async ({ event }) => {
@@ -471,6 +483,113 @@ export class SlackChannel implements Channel {
       }
     } catch (err) {
       logger.warn({ channelId, threadTs, err }, 'Failed to post placeholder');
+    }
+  }
+
+  /**
+   * Auto-register a regular Slack channel when the bot joins it.
+   * Inherits container config from the first existing Slack group so repo
+   * mounts carry over by default. Requires trigger by default; upgrade to
+   * main via DB edit if desired.
+   */
+  private async autoRegisterChannel(channelId: string): Promise<void> {
+    const jid = `slack:${channelId}`;
+    const groups = this.opts.registeredGroups();
+    if (groups[jid]) return;
+    if (!this.opts.onRegisterGroup) return;
+
+    let channelName = channelId;
+    try {
+      const info = await this.app.client.conversations.info({
+        channel: channelId,
+      });
+      channelName =
+        (info.channel as { name?: string } | undefined)?.name || channelId;
+    } catch (err) {
+      logger.warn(
+        { err, channelId },
+        'conversations.info failed during auto-register, using channel ID',
+      );
+    }
+
+    // Inherit config from first Slack group (matches DM auto-register pattern)
+    const slackGroup = Object.entries(groups).find(([k]) =>
+      k.startsWith('slack:'),
+    );
+    const baseConfig = slackGroup?.[1]?.containerConfig;
+    const folderName = `slack_${channelName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+
+    this.opts.onRegisterGroup(jid, {
+      name: channelName,
+      folder: folderName,
+      trigger: `@${ASSISTANT_NAME}`,
+      added_at: new Date().toISOString(),
+      requiresTrigger: true,
+      containerConfig: baseConfig,
+    });
+    updateChatName(jid, channelName);
+    logger.info(
+      { jid, name: channelName, folder: folderName },
+      'Auto-registered channel on bot join',
+    );
+
+    await this.backfillChannelHistory(channelId, jid, 20);
+  }
+
+  /**
+   * Pull the most recent `limit` messages from the channel into the pipeline,
+   * so messages sent before auto-registration aren't lost. Each message is
+   * delivered through onMessage as if it had arrived live — recovery picks
+   * them up from the DB on the next message loop tick.
+   */
+  private async backfillChannelHistory(
+    channelId: string,
+    jid: string,
+    limit: number,
+  ): Promise<void> {
+    try {
+      const result = await this.app.client.conversations.history({
+        channel: channelId,
+        limit,
+      });
+      const messages = (result.messages || []).slice().reverse(); // oldest first
+      for (const m of messages) {
+        const rec = m as {
+          ts?: string;
+          user?: string;
+          text?: string;
+          subtype?: string;
+          bot_id?: string;
+          thread_ts?: string;
+        };
+        if (!rec.ts) continue;
+        // Skip join/leave system messages and our own postings
+        if (rec.subtype === 'channel_join' || rec.subtype === 'channel_leave')
+          continue;
+        const isBot = !!rec.bot_id || rec.user === this.botUserId;
+        const senderName = isBot
+          ? ASSISTANT_NAME
+          : (rec.user ? await this.resolveUserName(rec.user) : undefined) ||
+            rec.user ||
+            'unknown';
+        this.opts.onMessage(jid, {
+          id: rec.ts,
+          chat_jid: jid,
+          sender: rec.user || rec.bot_id || '',
+          sender_name: senderName,
+          content: rec.text || '',
+          timestamp: new Date(parseFloat(rec.ts) * 1000).toISOString(),
+          is_from_me: isBot,
+          is_bot_message: isBot,
+          thread_ts: rec.thread_ts,
+        });
+      }
+      logger.info(
+        { channelId, count: messages.length },
+        'Backfilled channel history on auto-register',
+      );
+    } catch (err) {
+      logger.warn({ err, channelId }, 'Channel history backfill failed');
     }
   }
 
