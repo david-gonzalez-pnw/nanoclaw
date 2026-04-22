@@ -22,9 +22,15 @@ import {
   SendMessageOptions,
 } from '../types.js';
 
-// Slack's chat.postMessage API limits text to ~4000 characters per call.
-// Messages exceeding this are split into sequential chunks.
-const MAX_MESSAGE_LENGTH = 4000;
+// Slack's section/text limits are officially 3000 chars; we chunk below that
+// to leave headroom for trailing mrkdwn sigils and avoid msg_too_long errors
+// that have bitten us at 4000.
+const MAX_MESSAGE_LENGTH = 3000;
+// Hard cap on total chunks per response. Anything beyond this is truncated with
+// an explicit "truncated" footer — silently dropping a 50k response is worse
+// than a visible cap. 10 × 3000 = 30k chars, more than enough for any sane reply.
+const MAX_TOTAL_CHUNKS = 10;
+const TRUNCATION_SUFFIX = '\n\n_…response truncated; see host logs for full output._';
 
 // Supported MIME types by category. Each category has its own delivery path:
 //   IMAGE — downloaded, path embedded as [Attached image: ...] for the agent's Read tool
@@ -63,6 +69,47 @@ function categorize(mime: string): FileCategory {
   if (AUDIO_MIME_PREFIXES.some((p) => mime.startsWith(p))) return 'audio';
   if (DOC_MIME_TYPES.has(mime)) return 'doc';
   return 'unsupported';
+}
+
+/**
+ * Local regex-based markdown → Slack mrkdwn conversion. Safety net for when
+ * the Ollama formatter is unavailable; also idempotent so it's cheap to run
+ * as a final pass even after Ollama succeeds. Splits code blocks out so
+ * their contents are preserved verbatim.
+ */
+function toSlackMrkdwnLocal(text: string): string {
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts
+    .map((part, i) => {
+      if (i % 2 === 1) return part; // code block — leave untouched
+      return part
+        .replace(/\*\*([^*\n]+)\*\*/g, '*$1*') // **bold** → *bold*
+        .replace(/__([^_\n]+)__/g, '*$1*') // __bold__ → *bold*
+        .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '_$1_') // *italic* → _italic_
+        .replace(/~~([^~\n]+)~~/g, '~$1~') // ~~strike~~ → ~strike~
+        .replace(/^#{1,6}\s+(.+)$/gm, '*$1*') // headers → bold
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>') // [t](u) → <u|t>
+        .replace(/^(\s*)[-*+]\s+/gm, '$1• '); // - / * / + bullets → •
+    })
+    .join('');
+}
+
+function isSlackMsgTooLongError(err: unknown): boolean {
+  const anyErr = err as {
+    data?: { error?: string };
+    code?: string;
+  } | undefined;
+  return (
+    anyErr?.data?.error === 'msg_too_long' ||
+    (anyErr?.code === 'slack_webapi_platform_error' &&
+      anyErr?.data?.error === 'msg_too_long')
+  );
+}
+
+function applyTruncation(text: string): string {
+  const maxTotal = MAX_MESSAGE_LENGTH * MAX_TOTAL_CHUNKS - TRUNCATION_SUFFIX.length;
+  if (text.length <= MAX_MESSAGE_LENGTH * MAX_TOTAL_CHUNKS) return text;
+  return text.slice(0, maxTotal) + TRUNCATION_SUFFIX;
 }
 
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
@@ -374,7 +421,20 @@ export class SlackChannel implements Channel {
   ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     const threadTs = options?.threadId;
+    // Primary pass: Ollama-based converter. Safety net: local regex-based
+    // mrkdwn conversion so Ollama outages don't leak raw markdown into Slack.
     text = await formatForChannel(text, this.formattingSpec);
+    text = toSlackMrkdwnLocal(text);
+    // Hard cap total length — a silent 50k-char reply is worse than a visible
+    // truncation, since Slack will reject oversized payloads anyway.
+    const originalLength = text.length;
+    text = applyTruncation(text);
+    if (text.length !== originalLength) {
+      logger.warn(
+        { jid, originalLength, truncatedTo: text.length },
+        'Slack outbound message truncated (exceeded MAX_TOTAL_CHUNKS)',
+      );
+    }
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text, threadTs });
@@ -436,11 +496,55 @@ export class SlackChannel implements Channel {
         'Slack message sent',
       );
     } catch (err) {
+      if (isSlackMsgTooLongError(err)) {
+        // Content is too big for Slack regardless of retries — surface a
+        // user-visible error instead of requeueing an unsendable payload.
+        logger.error(
+          { jid, length: text.length, err },
+          'Slack rejected message (msg_too_long); posting fallback notice',
+        );
+        await this.postErrorFallback(channelId, threadTs, text.length);
+        return;
+      }
       this.outgoingQueue.push({ jid, text, threadTs });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
+    }
+  }
+
+  /**
+   * When a response is unsendable (msg_too_long), update the placeholder (if
+   * any) with a short notice so the user isn't stuck looking at "Finding
+   * answers..." forever. Errors here are swallowed — there's nothing more to do.
+   */
+  private async postErrorFallback(
+    channelId: string,
+    threadTs: string | undefined,
+    originalLength: number,
+  ): Promise<void> {
+    const notice = `⚠️ My reply was too large for Slack to accept (${originalLength} chars). Full output is in the host logs.`;
+    const placeholderKey = threadTs ? `${channelId}:${threadTs}` : null;
+    const placeholderTs = placeholderKey
+      ? this.pendingPlaceholders.get(placeholderKey)
+      : null;
+    try {
+      if (placeholderTs) {
+        this.pendingPlaceholders.delete(placeholderKey!);
+        await this.app.client.chat.update({
+          channel: channelId,
+          ts: placeholderTs,
+          text: notice,
+        });
+      } else {
+        const opts = threadTs
+          ? { channel: channelId, text: notice, thread_ts: threadTs }
+          : { channel: channelId, text: notice };
+        await this.app.client.chat.postMessage(opts);
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to post msg_too_long fallback notice');
     }
   }
 

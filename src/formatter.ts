@@ -7,7 +7,11 @@
 import { OLLAMA_URL, OLLAMA_FORMATTER_MODEL } from './config.js';
 import { logger } from './logger.js';
 
-const FORMATTER_TIMEOUT = 10_000;
+const FORMATTER_TIMEOUT = 30_000;
+// Ollama inference time scales with input length. For very long messages the
+// local model reliably blows past even a generous timeout, so we skip it and
+// let the channel's local regex fallback handle conversion instead.
+const FORMATTER_MAX_INPUT = 6_000;
 
 /**
  * Check if text contains markdown formatting that needs conversion.
@@ -30,6 +34,13 @@ export async function formatForChannel(
   spec?: string,
 ): Promise<string> {
   if (!spec || !hasMarkdownFormatting(text)) {
+    return text;
+  }
+  if (text.length > FORMATTER_MAX_INPUT) {
+    logger.info(
+      { length: text.length, cap: FORMATTER_MAX_INPUT },
+      'Skipping Ollama formatter — message too long; channel fallback will handle conversion',
+    );
     return text;
   }
 

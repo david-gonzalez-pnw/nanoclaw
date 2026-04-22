@@ -648,20 +648,20 @@ describe('SlackChannel', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('splits long messages at 4000 character boundary', async () => {
+    it('splits long messages at 3000 character boundary', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      // Create a message longer than 4000 chars
-      const longText = 'A'.repeat(4500);
+      // Create a message longer than 3000 chars
+      const longText = 'A'.repeat(3500);
       await channel.sendMessage('slack:C0123456789', longText);
 
-      // Should be split into 2 messages: 4000 + 500
+      // Should be split into 2 messages: 3000 + 500
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
       expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(1, {
         channel: 'C0123456789',
-        text: 'A'.repeat(4000),
+        text: 'A'.repeat(3000),
       });
       expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(2, {
         channel: 'C0123456789',
@@ -669,12 +669,12 @@ describe('SlackChannel', () => {
       });
     });
 
-    it('sends exactly-4000-char messages as a single message', async () => {
+    it('sends exactly-3000-char messages as a single message', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      const text = 'B'.repeat(4000);
+      const text = 'B'.repeat(3000);
       await channel.sendMessage('slack:C0123456789', text);
 
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(1);
@@ -684,15 +684,15 @@ describe('SlackChannel', () => {
       });
     });
 
-    it('splits messages into 3 parts when over 8000 chars', async () => {
+    it('splits messages into 3 parts when over 6000 chars', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      const longText = 'C'.repeat(8500);
+      const longText = 'C'.repeat(6500);
       await channel.sendMessage('slack:C0123456789', longText);
 
-      // 4000 + 4000 + 500 = 3 messages
+      // 3000 + 3000 + 500 = 3 messages
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(3);
     });
 
