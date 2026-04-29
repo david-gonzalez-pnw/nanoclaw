@@ -278,9 +278,7 @@ export class SlackChannel implements Channel {
       const files = (msg as FileShareMessageEvent).files;
       const hasPlaceholderContent =
         content ||
-        (files &&
-          !isBotMessage &&
-          files.some((f) => f.url_private_download));
+        (files && !isBotMessage && files.some((f) => f.url_private_download));
       if (
         threadTs &&
         !isBotMessage &&

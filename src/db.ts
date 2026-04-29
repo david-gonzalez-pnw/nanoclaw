@@ -1048,9 +1048,9 @@ export function isTranscriptionCancelRequested(id: number): boolean {
 export function getTranscriptionJob(
   id: number,
 ): TranscriptionJobRow | undefined {
-  return db
-    .prepare(`SELECT * FROM transcription_jobs WHERE id = ?`)
-    .get(id) as TranscriptionJobRow | undefined;
+  return db.prepare(`SELECT * FROM transcription_jobs WHERE id = ?`).get(id) as
+    | TranscriptionJobRow
+    | undefined;
 }
 
 export function listActiveTranscriptionJobs(): TranscriptionJobRow[] {
