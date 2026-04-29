@@ -449,9 +449,7 @@ export function buildResolutionAnnouncement(
 
   return {
     text,
-    blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text } },
-    ],
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
   };
 }
 

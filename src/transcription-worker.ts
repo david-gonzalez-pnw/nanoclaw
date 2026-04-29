@@ -120,7 +120,10 @@ async function processJob(
 
   const cancelPoller = setInterval(() => {
     if (isTranscriptionCancelRequested(job.id)) {
-      logger.info({ jobId: job.id }, 'Cancel requested; aborting transcription');
+      logger.info(
+        { jobId: job.id },
+        'Cancel requested; aborting transcription',
+      );
       controller.abort();
     }
   }, 2_000);
@@ -267,10 +270,7 @@ async function probeDuration(path: string): Promise<number | null> {
     const seconds = parseFloat(stdout.trim());
     return Number.isFinite(seconds) ? seconds : null;
   } catch (err) {
-    logger.debug(
-      { err, path },
-      'ffprobe failed; using default job timeout',
-    );
+    logger.debug({ err, path }, 'ffprobe failed; using default job timeout');
     return null;
   }
 }

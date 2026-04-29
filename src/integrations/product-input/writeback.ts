@@ -46,7 +46,11 @@ import { githubLoginForSlackUser } from './team.js';
 // keep the call-sites readable.
 const labels = () => {
   const c = loadPiConfig();
-  return { required: c.labelRequired, pending: c.labelPending, resolved: c.labelResolved };
+  return {
+    required: c.labelRequired,
+    pending: c.labelPending,
+    resolved: c.labelResolved,
+  };
 };
 const slackChannel = () => loadPiConfig().slackChannel;
 const githubRepo = () => loadPiConfig().githubRepo;
@@ -131,7 +135,12 @@ async function notifyPr(
   upsertPiPrState(prNumber, { thread_ts: ts, notified_at: Date.now() });
 
   try {
-    await swapLabels(deps.github, prNumber, labels().required, labels().pending);
+    await swapLabels(
+      deps.github,
+      prNumber,
+      labels().required,
+      labels().pending,
+    );
   } catch (err) {
     logger.error(
       { err, prNumber },
@@ -334,7 +343,12 @@ async function processPr(deps: WritebackDeps, prNumber: number): Promise<void> {
   if (!posted.ok) return;
 
   try {
-    await swapLabels(deps.github, prNumber, labels().pending, labels().resolved);
+    await swapLabels(
+      deps.github,
+      prNumber,
+      labels().pending,
+      labels().resolved,
+    );
   } catch (err) {
     logger.warn(
       { err, prNumber },
@@ -342,7 +356,10 @@ async function processPr(deps: WritebackDeps, prNumber: number): Promise<void> {
     );
   }
   upsertPiPrState(prNumber, { resolved_at: Date.now() });
-  logger.info({ prNumber, commentUrl: posted.html_url }, 'PR resolved and written back');
+  logger.info(
+    { prNumber, commentUrl: posted.html_url },
+    'PR resolved and written back',
+  );
 
   // Immediately try the Slack announcement — same tick, fresh URL in hand.
   // Failures aren't fatal; the post-resolution catch-up branch will retry.
@@ -503,7 +520,9 @@ async function commitDecisionsToRfc(
   }
 }
 
-function summarizeAnswers(rows: PiAnswerRow[]): import('./slack-ui.js').ResolutionSummary {
+function summarizeAnswers(
+  rows: PiAnswerRow[],
+): import('./slack-ui.js').ResolutionSummary {
   // Reduce to one effective decision per pi_key. Tiebreak rows trump
   // everything; otherwise prefer non-defaulted human votes; otherwise
   // accept whatever's there.

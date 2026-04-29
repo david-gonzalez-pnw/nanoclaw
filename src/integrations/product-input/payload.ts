@@ -22,7 +22,12 @@ export interface ResolutionDecision {
   reasoning: string | null;
   decidedBy: string | null; // "@github-login"
   decidedAt: string; // ISO 8601
-  how: 'Accepted eng rec' | 'Override' | 'Defaulted' | 'Tie-break' | 'Needs discussion';
+  how:
+    | 'Accepted eng rec'
+    | 'Override'
+    | 'Defaulted'
+    | 'Tie-break'
+    | 'Needs discussion';
 }
 
 export interface ResolutionPayload {

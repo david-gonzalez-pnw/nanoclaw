@@ -94,10 +94,7 @@ export async function getPr(
   client: GithubClient,
   prNumber: number,
 ): Promise<GithubPrSummary | null> {
-  const res = await githubFetch(
-    client,
-    `repos/${repo()}/pulls/${prNumber}`,
-  );
+  const res = await githubFetch(client, `repos/${repo()}/pulls/${prNumber}`);
   if (!res.ok) return null;
   const data = (await res.json()) as GithubPrSummary & { merged?: boolean };
   return data;

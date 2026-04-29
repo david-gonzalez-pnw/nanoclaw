@@ -12,7 +12,9 @@ export interface ProductInputOptions {
   slackApp: App;
 }
 
-export async function initProductInput(opts: ProductInputOptions): Promise<void> {
+export async function initProductInput(
+  opts: ProductInputOptions,
+): Promise<void> {
   const cfg = loadPiConfig();
   if (!cfg.enabled) {
     logger.info('Product Input integration disabled (PI_ENABLED != true)');

@@ -81,9 +81,7 @@ export const TRANSCRIPTION_MODEL =
   envConfig.TRANSCRIPTION_MODEL ||
   'large-v3-turbo';
 export const TRANSCRIPTION_DEVICE =
-  process.env.TRANSCRIPTION_DEVICE ||
-  envConfig.TRANSCRIPTION_DEVICE ||
-  'cuda';
+  process.env.TRANSCRIPTION_DEVICE || envConfig.TRANSCRIPTION_DEVICE || 'cuda';
 // Max seconds to wait for the sidecar to become healthy after spawn.
 // Model load is ~40s first time (GPU-resident after), +download on first ever run.
 export const TRANSCRIPTION_STARTUP_TIMEOUT = parseInt(

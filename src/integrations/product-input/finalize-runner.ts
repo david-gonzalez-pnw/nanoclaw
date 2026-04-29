@@ -8,10 +8,7 @@ import { logger } from '../../logger.js';
 import { loadPiConfig } from './config.js';
 import type { GithubClient } from './github.js';
 import { getPr } from './github.js';
-import {
-  buildResolutionPayload,
-  writeResolutionPayload,
-} from './payload.js';
+import { buildResolutionPayload, writeResolutionPayload } from './payload.js';
 
 export interface FinalizeResult {
   ok: boolean;
@@ -176,7 +173,10 @@ export async function runCommitPiDecisions(args: {
       try {
         fs.mkdirSync(closeSentinelDir, { recursive: true });
         fs.writeFileSync(path.join(closeSentinelDir, '_close'), '');
-        logger.debug({ prNumber }, 'Wrote close sentinel for finalize container');
+        logger.debug(
+          { prNumber },
+          'Wrote close sentinel for finalize container',
+        );
       } catch (err) {
         logger.warn({ err, prNumber }, 'Failed to write close sentinel');
       }
@@ -228,7 +228,8 @@ export async function runCommitPiDecisions(args: {
     return {
       ok: false,
       reason: 'no-result-emitted',
-      details: 'Container exited cleanly but never emitted a pi-finalize-result line',
+      details:
+        'Container exited cleanly but never emitted a pi-finalize-result line',
     };
   }
   const match = lastResult.match(RESULT_LINE_RE);
