@@ -22,8 +22,10 @@ vi.mock('../logger.js', () => ({
 }));
 
 // Mock db
+const createTranscriptionJobMock = vi.hoisted(() => vi.fn(() => 1));
 vi.mock('../db.js', () => ({
   updateChatName: vi.fn(),
+  createTranscriptionJob: createTranscriptionJobMock,
 }));
 
 // Mock slackify-markdown — pass through text unchanged in tests
@@ -941,23 +943,11 @@ describe('SlackChannel', () => {
       expect(transcribeAudioFileMock).not.toHaveBeenCalled();
     });
 
-    it('transcribes audio and embeds as [Voice: ...]', async () => {
+    it('enqueues transcription job for audio and defers onMessage', async () => {
+      createTranscriptionJobMock.mockClear();
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
-
-      transcribeAudioFileMock.mockResolvedValue({
-        text: 'hello from the voice note',
-        duration: 3.2,
-        language: 'en',
-      });
-
-      const reactionsAdd = vi.fn().mockResolvedValue({});
-      const reactionsRemove = vi.fn().mockResolvedValue({});
-      currentApp().client.reactions = {
-        add: reactionsAdd,
-        remove: reactionsRemove,
-      };
 
       await triggerMessageEvent(
         fileShareEvent([
@@ -971,55 +961,19 @@ describe('SlackChannel', () => {
         ]) as any,
       );
 
-      expect(transcribeAudioFileMock).toHaveBeenCalledTimes(1);
-      expect(opts.onMessage).toHaveBeenCalledWith(
-        'slack:C0123456789',
+      // Transcription is handled by the async worker — the inbound handler
+      // should enqueue a job and NOT deliver the message inline. The worker
+      // injects the synthesized message after transcription completes.
+      expect(createTranscriptionJobMock).toHaveBeenCalledTimes(1);
+      expect(createTranscriptionJobMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: expect.stringContaining(
-            '[Voice: hello from the voice note]',
-          ),
+          chat_jid: 'slack:C0123456789',
+          file_name: 'note.m4a',
+          file_bytes: 2048,
         }),
       );
-      // :ear: reaction bracketed the transcription
-      expect(reactionsAdd).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'ear' }),
-      );
-      expect(reactionsRemove).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'ear' }),
-      );
-    });
-
-    it('falls back to unavailable marker when transcription returns null', async () => {
-      const opts = createTestOpts();
-      const channel = new SlackChannel(opts);
-      await channel.connect();
-
-      transcribeAudioFileMock.mockResolvedValue(null);
-      currentApp().client.reactions = {
-        add: vi.fn().mockResolvedValue({}),
-        remove: vi.fn().mockResolvedValue({}),
-      };
-
-      await triggerMessageEvent(
-        fileShareEvent([
-          {
-            id: 'F3',
-            name: 'note.webm',
-            mimetype: 'audio/webm',
-            size: 4096,
-            url_private_download: 'https://slack/F3',
-          },
-        ]) as any,
-      );
-
-      expect(opts.onMessage).toHaveBeenCalledWith(
-        'slack:C0123456789',
-        expect.objectContaining({
-          content: expect.stringContaining(
-            '[Voice Message — transcription unavailable]',
-          ),
-        }),
-      );
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(transcribeAudioFileMock).not.toHaveBeenCalled();
     });
 
     it('embeds PDFs as [Attached file: ...] refs', async () => {

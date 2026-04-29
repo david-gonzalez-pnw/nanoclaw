@@ -67,6 +67,10 @@ import {
   stopTranscriptionService,
 } from './transcription.js';
 import {
+  startTranscriptionWorker,
+  stopTranscriptionWorker,
+} from './transcription-worker.js';
+import {
   Channel,
   NewMessage,
   RegisteredGroup,
@@ -607,6 +611,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     shutdownProductInput();
+    stopTranscriptionWorker();
     proxyServer.close();
     await stopJobScheduler();
     await queue.shutdown(10000);
@@ -727,10 +732,28 @@ async function main(): Promise<void> {
     (ch) => ch.name === 'slack',
   ) as (typeof channels)[number] & {
     getApp?: () => import('@slack/bolt').App;
+    updatePlaceholder?: (
+      jid: string,
+      threadTs: string | null,
+      text: string,
+    ) => Promise<void>;
   };
   if (slackChannel?.getApp) {
     await initProductInput({ slackApp: slackChannel.getApp() });
   }
+
+  // Background transcription worker. Slack inbound handlers enqueue jobs; the
+  // worker polls, calls the sidecar with no fetch timeout, updates the Slack
+  // placeholder as it goes, and injects the synthesized NewMessage back into
+  // the normal inbound pipeline (same path as a fresh Slack message).
+  startTranscriptionWorker({
+    onTranscribed: (jid, msg) => channelOpts.onMessage(jid, msg),
+    updatePlaceholder: async (jid, threadTs, text) => {
+      if (slackChannel?.updatePlaceholder) {
+        await slackChannel.updatePlaceholder(jid, threadTs, text);
+      }
+    },
+  });
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

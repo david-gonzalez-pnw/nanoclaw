@@ -2,9 +2,13 @@ import type { WebClient } from '@slack/web-api';
 import type { View } from '@slack/types';
 
 import { logger } from '../../logger.js';
+import {
+  displayNameFor,
+  loadPiConfig,
+  renderSlaPingMentions,
+} from './config.js';
 import type { ParsedPi, PiAnswerRow, PiQuestionRow } from './db.js';
 import { shortRfcName, toSlackMrkdwn, truncate } from './parser.js';
-import { GITHUB_REPO, SLACK_PI_CHANNEL, TEAM } from './team.js';
 
 const MAX_SECTION_CHARS = 2800;
 
@@ -42,12 +46,13 @@ export function buildPrNotificationBlocks(input: PrNotificationInput): {
     rfcSections.push(`${header}\n${items}`);
   }
 
+  const cfg = loadPiConfig();
   const blocks: unknown[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `🔵 *Product Input needed — <${prUrl}|PR #${prNumber}>*\n*${prTitle}*`,
+        text: `🔵 *${cfg.featureName} needed — <${prUrl}|PR #${prNumber}>*\n*${prTitle}*`,
       },
     },
   ];
@@ -64,12 +69,13 @@ export function buildPrNotificationBlocks(input: PrNotificationInput): {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: chunk } });
   }
 
+  const slaPings = renderSlaPingMentions(cfg);
   blocks.push({
     type: 'context',
     elements: [
       {
         type: 'mrkdwn',
-        text: `${total} questions · Deadline: *${deadline}* · <@U0ANLGKAD96> <@U0AMVRJLVE0>`,
+        text: `${total} questions · Deadline: *${deadline}*${slaPings ? ' · ' + slaPings : ''}`,
       },
     ],
   });
@@ -99,7 +105,7 @@ export function buildPrNotificationBlocks(input: PrNotificationInput): {
 
   return {
     blocks,
-    text: `Product Input needed — PR #${prNumber}: ${total} questions for ${deadline}`,
+    text: `${cfg.featureName} needed — PR #${prNumber}: ${total} questions for ${deadline}`,
   };
 }
 
@@ -254,9 +260,9 @@ export function buildCompletionModal(
 ): View {
   let summary = `*Recorded ${answered} decision${answered !== 1 ? 's' : ''} for PR #${prNumber}.*`;
   if (discussed > 0) {
-    summary += `\n\n⚠️ ${discussed} question${discussed !== 1 ? 's' : ''} flagged for discussion — check <#${SLACK_PI_CHANNEL}>.`;
+    summary += `\n\n⚠️ ${discussed} question${discussed !== 1 ? 's' : ''} flagged for discussion — check <#${loadPiConfig().slackChannel}>.`;
   }
-  summary += `\n\n<https://github.com/${GITHUB_REPO}/pull/${prNumber}|View PR #${prNumber}>`;
+  summary += `\n\n<https://github.com/${loadPiConfig().githubRepo}/pull/${prNumber}|View PR #${prNumber}>`;
 
   return {
     type: 'modal',
@@ -292,7 +298,7 @@ export function buildAnswerSummaryText(input: AnswerSummaryInput): string {
   });
 
   return [
-    `✅ *<@${userId}> answered ${answeredCount}/${pis.length} questions for <https://github.com/${GITHUB_REPO}/pull/${prNumber}|PR #${prNumber}>*`,
+    `✅ *<@${userId}> answered ${answeredCount}/${pis.length} questions for <https://github.com/${loadPiConfig().githubRepo}/pull/${prNumber}|PR #${prNumber}>*`,
     '',
     lines.join('\n'),
   ].join('\n');
@@ -312,10 +318,11 @@ export function buildTiebreakAnnouncement(input: TiebreakAnnouncementInput): {
   const { prNumber, prUrl, question, votes } = input;
   const rfc = shortRfcName(question.rfc_slug);
 
+  const cfg = loadPiConfig();
   const voteLines = votes
     .filter((v) => !v.answered_by.startsWith('tiebreak:'))
     .map((v) => {
-      const who = TEAM[v.answered_by]?.displayName
+      const who = displayNameFor(cfg, v.answered_by)
         ? `<@${v.answered_by}>`
         : v.answered_by;
       if (v.decision === 'accept') return `  • ${who}: ✅ accepted eng rec`;
@@ -382,6 +389,78 @@ export function buildTiebreakAnnouncement(input: TiebreakAnnouncementInput): {
     blocks,
     text: `Tie break needed — PR #${prNumber} ${question.pi_id}`,
   };
+}
+
+export interface ResolutionSummary {
+  total: number;
+  accepted: number;
+  override: number;
+  defaulted: number;
+  tiebreak: number;
+  discuss: number;
+}
+
+export interface ResolutionAnnouncementInput {
+  prNumber: number;
+  prUrl: string;
+  commentUrl: string | null;
+  summary: ResolutionSummary;
+  ageHours: number;
+}
+
+export function buildResolutionAnnouncement(
+  input: ResolutionAnnouncementInput,
+): { blocks: unknown[]; text: string } {
+  const { prNumber, prUrl, commentUrl, summary, ageHours } = input;
+
+  const headerLink = `<${prUrl}|PR #${prNumber}>`;
+  const elapsed = formatElapsed(ageHours);
+  const headline = `✅ *Product Input closed — ${headerLink}*\n${summary.total}/${summary.total} decisions recorded · ${elapsed} elapsed`;
+
+  const counts = [
+    `:white_check_mark: ${summary.accepted} accepted`,
+    `:pencil2: ${summary.override} override`,
+    `:hourglass: ${summary.defaulted} defaulted`,
+    `:scales: ${summary.tiebreak} tie-break`,
+  ].join('  ');
+  const discussLine =
+    summary.discuss > 0
+      ? `\n:speech_balloon: ${summary.discuss} still flagged for discussion (not blocking resolution)`
+      : '';
+
+  const linkLine = commentUrl
+    ? `→ <${commentUrl}|See the decision table on GitHub>`
+    : `→ <${prUrl}|See the PR>`;
+
+  const footers: string[] = [];
+  if (summary.defaulted > 0) {
+    footers.push(
+      '_Defaulted PIs took the engineering recommendation after the 72h SLA elapsed with no human input._',
+    );
+  }
+  if (summary.discuss > 0) {
+    footers.push(
+      '_Discussion-flagged PIs were resolved by majority vote or eng-rec default; the discussion threads remain open if the team wants to revisit._',
+    );
+  }
+  const footer = footers.length > 0 ? `\n\n${footers.join('\n\n')}` : '';
+
+  const text = `${headline}\n${counts}${discussLine}\n\n${linkLine}${footer}`;
+
+  return {
+    text,
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text } },
+    ],
+  };
+}
+
+function formatElapsed(hours: number): string {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m`;
+  if (hours < 24) return `${Math.round(hours)}h`;
+  const days = Math.floor(hours / 24);
+  const rem = Math.round(hours - days * 24);
+  return rem ? `${days}d ${rem}h` : `${days}d`;
 }
 
 export async function postSlackMessage(

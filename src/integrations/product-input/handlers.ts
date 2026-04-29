@@ -18,11 +18,10 @@ import {
   buildCompletionModal,
   buildPIModal,
 } from './slack-ui.js';
-import {
-  githubLoginForSlackUser,
-  isTeamMember,
-  SLACK_PI_CHANNEL,
-} from './team.js';
+import { loadPiConfig } from './config.js';
+import { githubLoginForSlackUser, isTeamMember } from './team.js';
+
+const slackChannel = () => loadPiConfig().slackChannel;
 
 export interface HandlerDeps {
   github: GithubClient;
@@ -40,7 +39,7 @@ export function registerHandlers(app: App, deps: HandlerDeps): void {
     if (!prNumber) return;
 
     const userId = body.user.id;
-    const channelId = body.channel?.id || SLACK_PI_CHANNEL;
+    const channelId = body.channel?.id || slackChannel();
     const triggerId = body.trigger_id;
 
     const message = (body as { message?: { ts?: string; thread_ts?: string } })
@@ -111,7 +110,7 @@ export function registerHandlers(app: App, deps: HandlerDeps): void {
     const userId = body.user.id;
     if (!isTeamMember(userId)) {
       await client.chat.postEphemeral({
-        channel: body.channel?.id || SLACK_PI_CHANNEL,
+        channel: body.channel?.id || slackChannel(),
         user: userId,
         text: 'Only team members can resolve tie-breaks.',
       });
@@ -135,7 +134,7 @@ export function registerHandlers(app: App, deps: HandlerDeps): void {
       answers: {},
       startedAt: Date.now(),
       anchorTs,
-      channelId: body.channel?.id || SLACK_PI_CHANNEL,
+      channelId: body.channel?.id || slackChannel(),
       isTiebreak: true,
       tiebreakPiKey: piKey,
     };
@@ -274,7 +273,7 @@ export function registerHandlers(app: App, deps: HandlerDeps): void {
     // Post the answer summary in the PR's thread (bug fix: use session anchor first).
     const prState = getPiPrState(session.prNumber);
     const threadTs = session.anchorTs || prState?.thread_ts || undefined;
-    const channelId = session.channelId || SLACK_PI_CHANNEL;
+    const channelId = session.channelId || slackChannel();
     try {
       await client.chat.postMessage({
         channel: channelId,
@@ -379,7 +378,7 @@ export function registerHandlers(app: App, deps: HandlerDeps): void {
     });
 
     // Post the outcome in the tie-break thread.
-    const channelId = session.channelId || SLACK_PI_CHANNEL;
+    const channelId = session.channelId || slackChannel();
     const threadTs = session.anchorTs;
     const outcomeDesc =
       decision === 'accept'

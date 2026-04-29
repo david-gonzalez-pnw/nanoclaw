@@ -43,7 +43,11 @@ describe('transcription', () => {
     it('returns the transcript when the sidecar responds 200', async () => {
       fetchSpy.mockResolvedValue(
         new Response(
-          JSON.stringify({ text: 'hello world', duration: 1.5, language: 'en' }),
+          JSON.stringify({
+            text: 'hello world',
+            duration: 1.5,
+            language: 'en',
+          }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
         ) as any,
       );

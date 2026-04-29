@@ -178,7 +178,10 @@ function createSchema(database: Database.Database): void {
       notified_at INTEGER,
       sla_48h_warned_at INTEGER,
       blocking_sync_requested_at INTEGER,
-      resolved_at INTEGER
+      resolved_at INTEGER,
+      slack_announced_at INTEGER,
+      rfc_committed_at INTEGER,
+      rfc_commit_sha TEXT
     );
 
     CREATE TABLE IF NOT EXISTS pi_questions (
@@ -215,6 +218,50 @@ function createSchema(database: Database.Database): void {
       resolved_at INTEGER,
       PRIMARY KEY (pr_number, pi_key)
     );
+  `);
+
+  // pi_pr_state migrations for installs that pre-date these columns.
+  // Each ALTER is wrapped so re-running on a fresh DB is a no-op.
+  for (const stmt of [
+    `ALTER TABLE pi_pr_state ADD COLUMN slack_announced_at INTEGER`,
+    `ALTER TABLE pi_pr_state ADD COLUMN rfc_committed_at INTEGER`,
+    `ALTER TABLE pi_pr_state ADD COLUMN rfc_commit_sha TEXT`,
+  ]) {
+    try {
+      database.exec(stmt);
+    } catch {
+      /* column already exists */
+    }
+  }
+
+  // Async transcription job queue. Inbound audio attachments are downloaded
+  // synchronously, then a row is inserted here; a background worker drains the
+  // queue and injects the transcribed message back into the agent pipeline.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS transcription_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_jid TEXT NOT NULL,
+      message_ts TEXT NOT NULL,
+      thread_ts TEXT,
+      channel_id TEXT NOT NULL,
+      file_host_path TEXT NOT NULL,
+      file_name TEXT,
+      file_bytes INTEGER,
+      original_text TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      sender_name TEXT NOT NULL,
+      timestamp_iso TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      transcript TEXT,
+      error TEXT,
+      duration_seconds REAL,
+      created_at INTEGER NOT NULL,
+      started_at INTEGER,
+      completed_at INTEGER,
+      cancel_requested INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_transcription_jobs_status
+      ON transcription_jobs(status, created_at);
   `);
 }
 
@@ -847,4 +894,186 @@ export function getAllWorktreeEntries(): WorktreeEntry[] {
 /** Get the DB path for worker threads that need their own connection. */
 export function getDatabasePath(): string {
   return path.join(STORE_DIR, 'messages.db');
+}
+
+// --- Transcription job queue ---
+
+export type TranscriptionJobStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface TranscriptionJobRow {
+  id: number;
+  chat_jid: string;
+  message_ts: string;
+  thread_ts: string | null;
+  channel_id: string;
+  file_host_path: string;
+  file_name: string | null;
+  file_bytes: number | null;
+  original_text: string;
+  sender: string;
+  sender_name: string;
+  timestamp_iso: string;
+  status: TranscriptionJobStatus;
+  transcript: string | null;
+  error: string | null;
+  duration_seconds: number | null;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  cancel_requested: number;
+}
+
+export interface NewTranscriptionJob {
+  chat_jid: string;
+  message_ts: string;
+  thread_ts: string | null;
+  channel_id: string;
+  file_host_path: string;
+  file_name: string | null;
+  file_bytes: number | null;
+  original_text: string;
+  sender: string;
+  sender_name: string;
+  timestamp_iso: string;
+}
+
+export function createTranscriptionJob(job: NewTranscriptionJob): number {
+  const res = db
+    .prepare(
+      `INSERT INTO transcription_jobs
+       (chat_jid, message_ts, thread_ts, channel_id, file_host_path, file_name,
+        file_bytes, original_text, sender, sender_name, timestamp_iso, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      job.chat_jid,
+      job.message_ts,
+      job.thread_ts,
+      job.channel_id,
+      job.file_host_path,
+      job.file_name,
+      job.file_bytes,
+      job.original_text,
+      job.sender,
+      job.sender_name,
+      job.timestamp_iso,
+      Date.now(),
+    );
+  return res.lastInsertRowid as number;
+}
+
+export function claimNextTranscriptionJob(): TranscriptionJobRow | undefined {
+  const txn = db.transaction(() => {
+    const row = db
+      .prepare(
+        `SELECT * FROM transcription_jobs
+         WHERE status = 'pending' AND cancel_requested = 0
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+      .get() as TranscriptionJobRow | undefined;
+    if (!row) return undefined;
+    db.prepare(
+      `UPDATE transcription_jobs
+         SET status = 'running', started_at = ?
+         WHERE id = ? AND status = 'pending'`,
+    ).run(Date.now(), row.id);
+    row.status = 'running';
+    row.started_at = Date.now();
+    return row;
+  });
+  return txn();
+}
+
+export function updateTranscriptionJob(
+  id: number,
+  updates: Partial<
+    Pick<
+      TranscriptionJobRow,
+      'status' | 'transcript' | 'error' | 'duration_seconds' | 'completed_at'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if (updates.transcript !== undefined) {
+    fields.push('transcript = ?');
+    values.push(updates.transcript);
+  }
+  if (updates.error !== undefined) {
+    fields.push('error = ?');
+    values.push(updates.error);
+  }
+  if (updates.duration_seconds !== undefined) {
+    fields.push('duration_seconds = ?');
+    values.push(updates.duration_seconds);
+  }
+  if (updates.completed_at !== undefined) {
+    fields.push('completed_at = ?');
+    values.push(updates.completed_at);
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE transcription_jobs SET ${fields.join(', ')} WHERE id = ?`,
+  ).run(...values);
+}
+
+export function requestTranscriptionCancel(id: number): boolean {
+  const res = db
+    .prepare(
+      `UPDATE transcription_jobs SET cancel_requested = 1
+       WHERE id = ? AND status IN ('pending', 'running')`,
+    )
+    .run(id);
+  return res.changes > 0;
+}
+
+export function isTranscriptionCancelRequested(id: number): boolean {
+  const row = db
+    .prepare(`SELECT cancel_requested FROM transcription_jobs WHERE id = ?`)
+    .get(id) as { cancel_requested: number } | undefined;
+  return !!row && row.cancel_requested === 1;
+}
+
+export function getTranscriptionJob(
+  id: number,
+): TranscriptionJobRow | undefined {
+  return db
+    .prepare(`SELECT * FROM transcription_jobs WHERE id = ?`)
+    .get(id) as TranscriptionJobRow | undefined;
+}
+
+export function listActiveTranscriptionJobs(): TranscriptionJobRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM transcription_jobs
+       WHERE status IN ('pending', 'running')
+       ORDER BY created_at`,
+    )
+    .all() as TranscriptionJobRow[];
+}
+
+/**
+ * Crash recovery: any jobs left in 'running' at startup have no worker — flip
+ * them back to 'pending' so the worker re-runs them from scratch.
+ */
+export function recoverStuckTranscriptionJobs(): number {
+  const res = db
+    .prepare(
+      `UPDATE transcription_jobs
+         SET status = 'pending', started_at = NULL
+         WHERE status = 'running'`,
+    )
+    .run();
+  return res.changes;
 }

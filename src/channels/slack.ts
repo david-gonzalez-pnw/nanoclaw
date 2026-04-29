@@ -7,12 +7,11 @@ import type {
 import fs from 'fs';
 import path from 'path';
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
-import { updateChatName } from '../db.js';
+import { createTranscriptionJob, updateChatName } from '../db.js';
 import { formatForChannel } from '../formatter.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
-import { transcribeAudioFile } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -30,7 +29,8 @@ const MAX_MESSAGE_LENGTH = 3000;
 // an explicit "truncated" footer — silently dropping a 50k response is worse
 // than a visible cap. 10 × 3000 = 30k chars, more than enough for any sane reply.
 const MAX_TOTAL_CHUNKS = 10;
-const TRUNCATION_SUFFIX = '\n\n_…response truncated; see host logs for full output._';
+const TRUNCATION_SUFFIX =
+  '\n\n_…response truncated; see host logs for full output._';
 
 // Supported MIME types by category. Each category has its own delivery path:
 //   IMAGE — downloaded, path embedded as [Attached image: ...] for the agent's Read tool
@@ -64,6 +64,15 @@ type SlackFile = {
 
 type FileCategory = 'image' | 'audio' | 'doc' | 'unsupported';
 
+interface DownloadedAttachment {
+  category: 'image' | 'audio' | 'doc';
+  hostPath: string;
+  filename: string;
+  containerPath: string;
+  originalName: string | null;
+  fileBytes: number;
+}
+
 function categorize(mime: string): FileCategory {
   if (IMAGE_MIME_TYPES.has(mime)) return 'image';
   if (AUDIO_MIME_PREFIXES.some((p) => mime.startsWith(p))) return 'audio';
@@ -95,10 +104,12 @@ function toSlackMrkdwnLocal(text: string): string {
 }
 
 function isSlackMsgTooLongError(err: unknown): boolean {
-  const anyErr = err as {
-    data?: { error?: string };
-    code?: string;
-  } | undefined;
+  const anyErr = err as
+    | {
+        data?: { error?: string };
+        code?: string;
+      }
+    | undefined;
   return (
     anyErr?.data?.error === 'msg_too_long' ||
     (anyErr?.code === 'slack_webapi_platform_error' &&
@@ -107,7 +118,8 @@ function isSlackMsgTooLongError(err: unknown): boolean {
 }
 
 function applyTruncation(text: string): string {
-  const maxTotal = MAX_MESSAGE_LENGTH * MAX_TOTAL_CHUNKS - TRUNCATION_SUFFIX.length;
+  const maxTotal =
+    MAX_MESSAGE_LENGTH * MAX_TOTAL_CHUNKS - TRUNCATION_SUFFIX.length;
   if (text.length <= MAX_MESSAGE_LENGTH * MAX_TOTAL_CHUNKS) return text;
   return text.slice(0, maxTotal) + TRUNCATION_SUFFIX;
 }
@@ -259,35 +271,95 @@ export class SlackChannel implements Channel {
         }
       }
 
-      // Download and process attached files. Images/docs become [Attached ...: path]
-      // refs for the agent's Read tool; audio is transcribed inline as [Voice: ...].
+      // Post the "Finding answers..." placeholder BEFORE file download so the
+      // user gets instant feedback. Audio transcription is now async (handled
+      // by a background worker), so the placeholder + worker progress updates
+      // keep the user informed while the sidecar grinds.
       const files = (msg as FileShareMessageEvent).files;
+      const hasPlaceholderContent =
+        content ||
+        (files &&
+          !isBotMessage &&
+          files.some((f) => f.url_private_download));
+      if (
+        threadTs &&
+        !isBotMessage &&
+        hasPlaceholderContent &&
+        TRIGGER_PATTERN.test((content || '').trim())
+      ) {
+        await this.backfillThreadHistory(msg.channel, threadTs, jid);
+        await this.postPlaceholder(msg.channel, threadTs);
+      }
+
+      // Download attachments. Images/docs are appended to content now; audio
+      // files are handed to the async transcription worker (this handler does
+      // NOT await transcription).
+      let deferredByTranscription = false;
       if (files && !isBotMessage) {
         const group = groups[jid];
         if (group) {
-          const refs = await this.downloadSlackFiles(
+          const attachments = await this.downloadSlackFiles(
             files,
             group.folder,
             msg.ts,
-            msg.channel,
           );
-          if (refs.length > 0) {
-            const joined = refs.join('\n');
+          const syncRefs: string[] = [];
+          const audioAttachments: DownloadedAttachment[] = [];
+          for (const att of attachments) {
+            if (att.category === 'image') {
+              syncRefs.push(`[Attached image: ${att.containerPath}]`);
+            } else if (att.category === 'doc') {
+              syncRefs.push(`[Attached file: ${att.containerPath}]`);
+            } else {
+              audioAttachments.push(att);
+            }
+          }
+          if (syncRefs.length > 0) {
+            const joined = syncRefs.join('\n');
             content = content ? `${content}\n${joined}` : joined;
+          }
+          for (const att of audioAttachments) {
+            try {
+              const jobId = createTranscriptionJob({
+                chat_jid: jid,
+                message_ts: msg.ts,
+                thread_ts: threadTs || null,
+                channel_id: msg.channel,
+                file_host_path: att.hostPath,
+                file_name: att.originalName,
+                file_bytes: att.fileBytes,
+                original_text: content,
+                sender: msg.user || (msg as BotMessageEvent).bot_id || '',
+                sender_name: senderName,
+                timestamp_iso: timestamp,
+              });
+              deferredByTranscription = true;
+              logger.info(
+                {
+                  jobId,
+                  jid,
+                  fileName: att.originalName,
+                  bytes: att.fileBytes,
+                },
+                'Transcription job enqueued',
+              );
+            } catch (err) {
+              logger.error(
+                { err, jid, fileName: att.originalName },
+                'Failed to enqueue transcription job',
+              );
+            }
           }
         }
       }
 
+      // Audio was queued — the worker will inject the synthesized message
+      // (with [Voice: …] appended) when transcription finishes. Nothing more
+      // to do here.
+      if (deferredByTranscription) return;
+
       // Skip messages with no content after processing (e.g. unsupported file types only)
       if (!content) return;
-
-      // When triggered in a thread:
-      // 1. Backfill thread history so the agent sees the full conversation
-      // 2. Post a "Processing..." placeholder that gets updated with the real response
-      if (threadTs && !isBotMessage && TRIGGER_PATTERN.test(content.trim())) {
-        await this.backfillThreadHistory(msg.channel, threadTs, jid);
-        await this.postPlaceholder(msg.channel, threadTs);
-      }
 
       this.opts.onMessage(jid, {
         id: msg.ts,
@@ -349,26 +421,73 @@ export class SlackChannel implements Channel {
         // Auto-prepend trigger — assistant messages are always directed at the bot
         let content = `@${ASSISTANT_NAME} ${msg.text || ''}`;
 
-        // Download attached files (same as channel handler — images, audio, docs)
+        // Download attached files. Images/docs are rendered inline; audio
+        // files are enqueued for async transcription and the message is
+        // deferred until the worker injects the transcribed version.
+        let deferredByTranscription = false;
         const files = (msg as unknown as FileShareMessageEvent).files;
         if (files) {
           const groups = this.opts.registeredGroups();
           const group = groups[jid];
           if (group) {
-            const refs = await this.downloadSlackFiles(
+            const attachments = await this.downloadSlackFiles(
               files,
               group.folder,
               msg.ts,
-              msg.channel,
             );
-            if (refs.length > 0) {
-              const joined = refs.join('\n');
-              content = content ? `${content}\n${joined}` : joined;
+            const syncRefs: string[] = [];
+            const audioAttachments: DownloadedAttachment[] = [];
+            for (const att of attachments) {
+              if (att.category === 'image') {
+                syncRefs.push(`[Attached image: ${att.containerPath}]`);
+              } else if (att.category === 'doc') {
+                syncRefs.push(`[Attached file: ${att.containerPath}]`);
+              } else {
+                audioAttachments.push(att);
+              }
+            }
+            if (syncRefs.length > 0) {
+              content = `${content}\n${syncRefs.join('\n')}`;
+            }
+            for (const att of audioAttachments) {
+              try {
+                const jobId = createTranscriptionJob({
+                  chat_jid: jid,
+                  message_ts: msg.ts,
+                  thread_ts: threadTs || null,
+                  channel_id: msg.channel,
+                  file_host_path: att.hostPath,
+                  file_name: att.originalName,
+                  file_bytes: att.fileBytes,
+                  original_text: content,
+                  sender: msg.user || '',
+                  sender_name: senderName,
+                  timestamp_iso: timestamp,
+                });
+                deferredByTranscription = true;
+                logger.info(
+                  {
+                    jobId,
+                    jid,
+                    fileName: att.originalName,
+                    bytes: att.fileBytes,
+                  },
+                  'Transcription job enqueued (assistant DM)',
+                );
+              } catch (err) {
+                logger.error(
+                  { err, jid, fileName: att.originalName },
+                  'Failed to enqueue transcription job (assistant DM)',
+                );
+              }
             }
           }
         }
 
         this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', false);
+
+        // If audio was queued, the worker will inject the synthesized message.
+        if (deferredByTranscription) return;
 
         this.opts.onMessage(jid, {
           id: msg.ts,
@@ -556,6 +675,35 @@ export class SlackChannel implements Channel {
    *  action/view/command handlers after connect(). */
   getApp(): App {
     return this.app;
+  }
+
+  /**
+   * Update the "Finding answers..." placeholder with a transient status string
+   * (used by the async transcription worker to show progress). No-op if the
+   * thread has no tracked placeholder or the bot isn't connected.
+   */
+  async updatePlaceholder(
+    jid: string,
+    threadTs: string | null,
+    text: string,
+  ): Promise<void> {
+    if (!threadTs || !this.connected) return;
+    const channelId = jid.replace(/^slack:/, '');
+    const placeholderKey = `${channelId}:${threadTs}`;
+    const placeholderTs = this.pendingPlaceholders.get(placeholderKey);
+    if (!placeholderTs) return;
+    try {
+      await this.app.client.chat.update({
+        channel: channelId,
+        ts: placeholderTs,
+        text,
+      });
+    } catch (err) {
+      logger.debug(
+        { err, jid, threadTs },
+        'Placeholder update from worker failed',
+      );
+    }
   }
 
   ownsJid(jid: string): boolean {
@@ -837,21 +985,16 @@ export class SlackChannel implements Channel {
   }
 
   /**
-   * Download supported files from a Slack message and return strings ready to
-   * append to the message content. Each returned string is either a path
-   * reference (images/docs) that the agent reads via its multimodal Read tool,
-   * or an inline transcript (audio). Files that are unsupported, too large, or
-   * missing a download URL are skipped silently.
-   *
-   * For audio files, a :ear: reaction is added to the source message while
-   * transcription is running and removed on completion (success or failure).
+   * Download supported files from a Slack message and return typed metadata.
+   * Callers decide what to do with each attachment: images/docs are rendered
+   * inline; audio files get enqueued as async transcription jobs so the event
+   * handler doesn't block.
    */
   private async downloadSlackFiles(
     files: SlackFile[],
     groupFolder: string,
     messageTs: string,
-    channelId: string,
-  ): Promise<string[]> {
+  ): Promise<DownloadedAttachment[]> {
     const withDownloadUrl = files.filter((f) => f.url_private_download);
     if (withDownloadUrl.length === 0) return [];
 
@@ -865,63 +1008,44 @@ export class SlackChannel implements Channel {
     const uploadsDir = path.join(groupDir, 'uploads');
     fs.mkdirSync(uploadsDir, { recursive: true });
 
-    const results: string[] = [];
+    const results: DownloadedAttachment[] = [];
     const safeMsgTs = messageTs.replace(/\./g, '-');
-    const hasAudio = withDownloadUrl.some(
-      (f) => categorize(f.mimetype) === 'audio',
-    );
 
-    if (hasAudio) {
-      await this.addReaction(channelId, messageTs, 'ear');
-    }
+    for (const file of withDownloadUrl) {
+      const category = categorize(file.mimetype);
+      if (category === 'unsupported') continue;
 
-    try {
-      for (const file of withDownloadUrl) {
-        const category = categorize(file.mimetype);
-        if (category === 'unsupported') continue;
-
-        const cap =
-          category === 'image'
-            ? MAX_IMAGE_SIZE
-            : category === 'audio'
-              ? MAX_AUDIO_SIZE
-              : MAX_DOC_SIZE;
-        if (file.size > cap) {
-          logger.warn(
-            { fileId: file.id, size: file.size, cap, category },
-            'Slack attachment exceeds size cap, skipping',
-          );
-          continue;
-        }
-
-        const downloaded = await this.downloadOne(
-          file,
-          uploadsDir,
-          safeMsgTs,
-          category,
+      const cap =
+        category === 'image'
+          ? MAX_IMAGE_SIZE
+          : category === 'audio'
+            ? MAX_AUDIO_SIZE
+            : MAX_DOC_SIZE;
+      if (file.size > cap) {
+        logger.warn(
+          { fileId: file.id, size: file.size, cap, category },
+          'Slack attachment exceeds size cap, skipping',
         );
-        if (!downloaded) continue;
-
-        const { hostPath, filename } = downloaded;
-        const containerPath = `/workspace/group/uploads/${filename}`;
-
-        if (category === 'image') {
-          results.push(`[Attached image: ${containerPath}]`);
-        } else if (category === 'doc') {
-          results.push(`[Attached file: ${containerPath}]`);
-        } else {
-          const result = await transcribeAudioFile(hostPath);
-          if (result && result.text) {
-            results.push(`[Voice: ${result.text}]`);
-          } else {
-            results.push('[Voice Message — transcription unavailable]');
-          }
-        }
+        continue;
       }
-    } finally {
-      if (hasAudio) {
-        await this.removeReaction(channelId, messageTs, 'ear');
-      }
+
+      const downloaded = await this.downloadOne(
+        file,
+        uploadsDir,
+        safeMsgTs,
+        category,
+      );
+      if (!downloaded) continue;
+
+      const { hostPath, filename } = downloaded;
+      results.push({
+        category: category as 'image' | 'audio' | 'doc',
+        hostPath,
+        filename,
+        containerPath: `/workspace/group/uploads/${filename}`,
+        originalName: file.name,
+        fileBytes: file.size,
+      });
     }
 
     return results;

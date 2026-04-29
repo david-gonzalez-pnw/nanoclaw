@@ -1,10 +1,14 @@
 import { logger } from '../../logger.js';
+import { loadPiConfig } from './config.js';
 import type { ParsedPi } from './db.js';
 import { getGithubToken } from './github-auth.js';
 import { parsePIs } from './parser.js';
-import { GITHUB_REPO } from './team.js';
 
 const USER_AGENT = 'nanoclaw-product-input/1.0';
+
+function repo(): string {
+  return loadPiConfig().githubRepo;
+}
 
 export interface GithubClient {
   getToken: (forceRefresh?: boolean) => Promise<string | null>;
@@ -63,7 +67,7 @@ export async function listPendingPrs(
 ): Promise<GithubPrSummary[]> {
   const res = await githubFetch(
     client,
-    `search/issues?q=repo:${GITHUB_REPO}+type:pr+label:${encodeURIComponent(label)}+state:open&per_page=30`,
+    `search/issues?q=repo:${repo()}+type:pr+label:${encodeURIComponent(label)}+state:open&per_page=30`,
   );
   if (!res.ok) {
     logger.error(
@@ -92,7 +96,7 @@ export async function getPr(
 ): Promise<GithubPrSummary | null> {
   const res = await githubFetch(
     client,
-    `repos/${GITHUB_REPO}/pulls/${prNumber}`,
+    `repos/${repo()}/pulls/${prNumber}`,
   );
   if (!res.ok) return null;
   const data = (await res.json()) as GithubPrSummary & { merged?: boolean };
@@ -105,7 +109,7 @@ export async function fetchPIsForPR(
 ): Promise<ParsedPi[] | null> {
   const filesRes = await githubFetch(
     client,
-    `repos/${GITHUB_REPO}/pulls/${prNumber}/files`,
+    `repos/${repo()}/pulls/${prNumber}/files`,
   );
   if (!filesRes.ok) {
     logger.error(
@@ -119,9 +123,10 @@ export async function fetchPIsForPR(
     raw_url: string;
   }>;
 
+  const rfcDir = loadPiConfig().rfcDir.replace(/\/$/, '') + '/';
   const rfcFiles = files.filter(
     (f) =>
-      f.filename.startsWith('docs/rfcs/') &&
+      f.filename.startsWith(rfcDir) &&
       f.filename.endsWith('.md') &&
       !f.filename.includes('/shipped/'),
   );
@@ -151,8 +156,8 @@ export async function fetchPIsForPR(
 export function toRawContentUrl(rawUrl: string): string {
   const m = rawUrl.match(/github\.com\/([^/]+\/[^/]+)\/raw\/([^/]+)\/(.+)/);
   if (!m) return rawUrl;
-  const [, repo, sha, encodedPath] = m;
-  return `https://raw.githubusercontent.com/${repo}/${sha}/${decodeURIComponent(encodedPath)}`;
+  const [, repoSlug, sha, encodedPath] = m;
+  return `https://raw.githubusercontent.com/${repoSlug}/${sha}/${decodeURIComponent(encodedPath)}`;
 }
 
 export async function swapLabels(
@@ -163,43 +168,57 @@ export async function swapLabels(
 ): Promise<void> {
   await githubFetch(
     client,
-    `repos/${GITHUB_REPO}/issues/${prNumber}/labels/${encodeURIComponent(removeLabel)}`,
+    `repos/${repo()}/issues/${prNumber}/labels/${encodeURIComponent(removeLabel)}`,
     'DELETE',
   );
   await githubFetch(
     client,
-    `repos/${GITHUB_REPO}/issues/${prNumber}/labels`,
+    `repos/${repo()}/issues/${prNumber}/labels`,
     'POST',
     { labels: [addLabel] },
   );
+}
+
+export interface PostIssueCommentResult {
+  ok: boolean;
+  html_url?: string;
+  id?: number;
 }
 
 export async function postIssueComment(
   client: GithubClient,
   prNumber: number,
   body: string,
-): Promise<boolean> {
+): Promise<PostIssueCommentResult> {
   const res = await githubFetch(
     client,
-    `repos/${GITHUB_REPO}/issues/${prNumber}/comments`,
+    `repos/${repo()}/issues/${prNumber}/comments`,
     'POST',
     { body },
   );
   if (!res.ok) {
     logger.error({ status: res.status, prNumber }, 'Failed to post PR comment');
-    return false;
+    return { ok: false };
   }
-  return true;
+  const data = (await res.json()) as { id?: number; html_url?: string };
+  return { ok: true, html_url: data.html_url, id: data.id };
+}
+
+export interface IssueCommentRow {
+  body: string;
+  html_url: string;
+  id: number;
+  user?: { login?: string };
 }
 
 export async function listIssueComments(
   client: GithubClient,
   prNumber: number,
-): Promise<Array<{ body: string }>> {
+): Promise<IssueCommentRow[]> {
   const res = await githubFetch(
     client,
-    `repos/${GITHUB_REPO}/issues/${prNumber}/comments?per_page=100`,
+    `repos/${repo()}/issues/${prNumber}/comments?per_page=100`,
   );
   if (!res.ok) return [];
-  return (await res.json()) as Array<{ body: string }>;
+  return (await res.json()) as IssueCommentRow[];
 }

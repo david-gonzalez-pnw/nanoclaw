@@ -1,24 +1,29 @@
 import type { App } from '@slack/bolt';
 
-import { readEnvFile } from '../../env.js';
 import { logger } from '../../logger.js';
+import { loadPiConfig, validatePiConfig } from './config.js';
 import { startCronLoops, stopCronLoops } from './cron.js';
 import { defaultGithubClient } from './github.js';
 import { getGithubToken } from './github-auth.js';
 import { registerHandlers } from './handlers.js';
 import { ensureScanForPr } from './writeback.js';
 
-export interface Product InputPiOptions {
+export interface ProductInputOptions {
   slackApp: App;
 }
 
-export async function initProductInput(opts: Product InputPiOptions): Promise<void> {
-  const env = readEnvFile(['PI_ENABLED']);
-  const enabled =
-    (process.env.PI_ENABLED || env.PI_ENABLED) === 'true';
-  if (!enabled) {
-    logger.info(
-      'Product Input integration disabled (PI_ENABLED != true)',
+export async function initProductInput(opts: ProductInputOptions): Promise<void> {
+  const cfg = loadPiConfig();
+  if (!cfg.enabled) {
+    logger.info('Product Input integration disabled (PI_ENABLED != true)');
+    return;
+  }
+
+  const errors = validatePiConfig(cfg);
+  if (errors.length > 0) {
+    logger.warn(
+      { errors },
+      'Product Input config invalid; integration will not start',
     );
     return;
   }
@@ -41,7 +46,10 @@ export async function initProductInput(opts: Product InputPiOptions): Promise<vo
   });
   startCronLoops(deps);
 
-  logger.info('Product Input integration initialized (auth via gh CLI)');
+  logger.info(
+    { repo: cfg.githubRepo, channel: cfg.slackChannel },
+    'Product Input integration initialized (auth via gh CLI)',
+  );
 }
 
 export function shutdownProductInput(): void {

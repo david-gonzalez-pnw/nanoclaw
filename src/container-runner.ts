@@ -41,6 +41,28 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 let cachedDefaultConfig: ContainerConfig | null | undefined;
 
 /**
+ * Max mtime across a directory tree. Used to detect when the repo's
+ * agent-runner source has been updated and a group's writable copy needs
+ * refreshing. Returns 0 on any error (safe default — treats as not newer).
+ */
+function newestMtime(dir: string): number {
+  let max = 0;
+  const walk = (p: string) => {
+    try {
+      const st = fs.statSync(p);
+      if (st.mtimeMs > max) max = st.mtimeMs;
+      if (st.isDirectory()) {
+        for (const entry of fs.readdirSync(p)) walk(path.join(p, entry));
+      }
+    } catch {
+      /* missing/inaccessible entry — ignore */
+    }
+  };
+  walk(dir);
+  return max;
+}
+
+/**
  * Load the global default container config (e.g. additionalMounts applied to ALL groups).
  * Cached after first read.
  */
@@ -280,6 +302,12 @@ function buildVolumeMounts(
   // Copy agent-runner source into a per-group writable location so agents
   // can customize it (add tools, change behavior) without affecting other
   // groups. Recompiled on container startup via entrypoint.sh.
+  //
+  // Re-sync whenever the repo source is newer than the copy — otherwise a
+  // group that first ran before an SDK/agent-runner upgrade keeps running
+  // stale code that may be incompatible with the current SDK. (We saw this
+  // in the wild: an Apr-4 copy of agent-runner crashed under SDK 0.2.76 with
+  // "The 'path' argument must be of type string. Received undefined".)
   const agentRunnerSrc = path.join(
     projectRoot,
     'container',
@@ -292,8 +320,25 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    if (!fs.existsSync(groupAgentRunnerDir)) {
+      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+    } else {
+      const latestRepoMtime = newestMtime(agentRunnerSrc);
+      const copyMtime = newestMtime(groupAgentRunnerDir);
+      if (latestRepoMtime > copyMtime) {
+        // Repo is newer — replace the copy. Per-group customizations written
+        // by agents will be clobbered; that's acceptable since the agent can
+        // always re-apply them from memory, and staleness here has caused
+        // silent container crashes.
+        fs.rmSync(groupAgentRunnerDir, { recursive: true, force: true });
+        fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+        logger.info(
+          { group: group.folder, repoMtime: latestRepoMtime, copyMtime },
+          'agent-runner source drift detected — refreshed group copy',
+        );
+      }
+    }
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,

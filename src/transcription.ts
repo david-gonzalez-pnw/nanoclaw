@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'child_process';
+import http from 'http';
 import path from 'path';
 
 import {
@@ -130,6 +131,95 @@ export async function stopTranscriptionService(): Promise<void> {
  * Returns null if the sidecar is disabled, not ready, or the request fails —
  * callers should degrade gracefully (e.g. pass a placeholder to the agent).
  */
+// Node's fetch (undici) defaults to a 30s headers timeout. Larger whisper
+// models run at roughly real-time on GPU, so a multi-minute clip can easily
+// blow past that. Sidecar itself caps audio at 4h, so 15 min is a safe ceiling.
+const TRANSCRIBE_FETCH_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * No-timeout variant for the async transcription worker. Long audio can take
+ * hours on large-v3, and the worker has its own per-job soft timeout + cancel
+ * mechanism, so imposing a fetch-level abort would be counterproductive.
+ *
+ * Built on Node's `http` module instead of `fetch` because undici (which
+ * backs fetch) enforces a 5-minute `headersTimeout` that cannot be disabled
+ * without installing undici as a direct dep and passing a custom dispatcher.
+ * For a loopback call to a trusted sidecar, raw `http` is simpler and has no
+ * implicit timers.
+ */
+export function transcribeAudioFileAsync(
+  absolutePath: string,
+  signal?: AbortSignal,
+): Promise<TranscriptionResult | { error: string }> {
+  if (!TRANSCRIPTION_ENABLED) {
+    return Promise.resolve({ error: 'transcription disabled' });
+  }
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ path: absolutePath });
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: TRANSCRIPTION_PORT,
+        path: '/transcribe',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf-8');
+          if (!res.statusCode || res.statusCode >= 400) {
+            resolve({
+              error: `sidecar HTTP ${res.statusCode ?? '??'}: ${text.slice(0, 200)}`,
+            });
+            return;
+          }
+          try {
+            resolve(JSON.parse(text) as TranscriptionResult);
+          } catch (err) {
+            resolve({
+              error: `invalid sidecar response: ${err instanceof Error ? err.message : String(err)}`,
+            });
+          }
+        });
+      },
+    );
+
+    // Disable all implicit timeouts — the sidecar may hold the request open
+    // for hours on long audio. Worker-level soft timeout + AbortSignal handle
+    // the escape hatches.
+    req.setTimeout(0);
+    req.socket?.setTimeout?.(0);
+
+    const onAbort = () => {
+      req.destroy(new Error('aborted'));
+      resolve({ error: 'cancelled' });
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    req.on('error', (err) => {
+      if (signal?.aborted) {
+        resolve({ error: 'cancelled' });
+      } else {
+        resolve({ error: err.message });
+      }
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
+
 export async function transcribeAudioFile(
   absolutePath: string,
 ): Promise<TranscriptionResult | null> {
@@ -140,6 +230,7 @@ export async function transcribeAudioFile(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: absolutePath }),
+      signal: AbortSignal.timeout(TRANSCRIBE_FETCH_TIMEOUT_MS),
     });
 
     if (!res.ok) {

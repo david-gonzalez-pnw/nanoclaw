@@ -13,6 +13,10 @@ const envConfig = readEnvFile([
   'CONTAINER_ALIAS',
   'OLLAMA_URL',
   'OLLAMA_FORMATTER_MODEL',
+  'TRANSCRIPTION_ENABLED',
+  'TRANSCRIPTION_MODEL',
+  'TRANSCRIPTION_DEVICE',
+  'TRANSCRIPTION_PORT',
 ]);
 
 export const ASSISTANT_NAME =
@@ -66,15 +70,20 @@ export const IPC_POLL_INTERVAL = 1000;
 
 // Transcription sidecar (Python + faster-whisper, keeps model resident in GPU)
 export const TRANSCRIPTION_ENABLED =
-  process.env.TRANSCRIPTION_ENABLED !== 'false';
+  (process.env.TRANSCRIPTION_ENABLED || envConfig.TRANSCRIPTION_ENABLED) !==
+  'false';
 export const TRANSCRIPTION_PORT = parseInt(
-  process.env.TRANSCRIPTION_PORT || '3003',
+  process.env.TRANSCRIPTION_PORT || envConfig.TRANSCRIPTION_PORT || '3003',
   10,
 );
 export const TRANSCRIPTION_MODEL =
-  process.env.TRANSCRIPTION_MODEL || 'large-v3-turbo';
+  process.env.TRANSCRIPTION_MODEL ||
+  envConfig.TRANSCRIPTION_MODEL ||
+  'large-v3-turbo';
 export const TRANSCRIPTION_DEVICE =
-  process.env.TRANSCRIPTION_DEVICE || 'cuda';
+  process.env.TRANSCRIPTION_DEVICE ||
+  envConfig.TRANSCRIPTION_DEVICE ||
+  'cuda';
 // Max seconds to wait for the sidecar to become healthy after spawn.
 // Model load is ~40s first time (GPU-resident after), +download on first ever run.
 export const TRANSCRIPTION_STARTUP_TIMEOUT = parseInt(

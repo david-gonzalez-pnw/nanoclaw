@@ -89,6 +89,9 @@ export interface PiPrStateRow {
   sla_48h_warned_at: number | null;
   blocking_sync_requested_at: number | null;
   resolved_at: number | null;
+  slack_announced_at: number | null;
+  rfc_committed_at: number | null;
+  rfc_commit_sha: string | null;
 }
 
 export function getPiPrState(prNumber: number): PiPrStateRow | undefined {
@@ -109,13 +112,16 @@ export function upsertPiPrState(
     sla_48h_warned_at: existing?.sla_48h_warned_at ?? null,
     blocking_sync_requested_at: existing?.blocking_sync_requested_at ?? null,
     resolved_at: existing?.resolved_at ?? null,
+    slack_announced_at: existing?.slack_announced_at ?? null,
+    rfc_committed_at: existing?.rfc_committed_at ?? null,
+    rfc_commit_sha: existing?.rfc_commit_sha ?? null,
     ...updates,
   };
   getDb()
     .prepare(
       `INSERT OR REPLACE INTO pi_pr_state
-       (pr_number, thread_ts, notified_at, sla_48h_warned_at, blocking_sync_requested_at, resolved_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       (pr_number, thread_ts, notified_at, sla_48h_warned_at, blocking_sync_requested_at, resolved_at, slack_announced_at, rfc_committed_at, rfc_commit_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       merged.pr_number,
@@ -124,13 +130,23 @@ export function upsertPiPrState(
       merged.sla_48h_warned_at,
       merged.blocking_sync_requested_at,
       merged.resolved_at,
+      merged.slack_announced_at,
+      merged.rfc_committed_at,
+      merged.rfc_commit_sha,
     );
 }
 
 export function getUnresolvedPrs(): PiPrStateRow[] {
+  // Picks up: (a) PRs not yet resolved on GitHub, (b) PRs resolved but
+  // not yet announced in Slack, (c) PRs announced but not yet committed
+  // back to the RFC files. Each writeback tick advances state by one phase.
   return getDb()
     .prepare(
-      `SELECT * FROM pi_pr_state WHERE notified_at IS NOT NULL AND resolved_at IS NULL`,
+      `SELECT * FROM pi_pr_state
+       WHERE notified_at IS NOT NULL
+         AND (resolved_at IS NULL
+              OR slack_announced_at IS NULL
+              OR rfc_committed_at IS NULL)`,
     )
     .all() as PiPrStateRow[];
 }

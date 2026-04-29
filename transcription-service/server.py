@@ -63,17 +63,26 @@ def transcribe(path: str, initial_prompt: str | None = None) -> dict:
 
     with _model_lock:
         t0 = time.time()
+        # VAD tuned to keep short utterances (default threshold=0.5 /
+        # min_silence=2000ms clips single-syllable words at phrase boundaries).
         segments, info = _model.transcribe(
             path,
             beam_size=5,
             initial_prompt=initial_prompt,
             vad_filter=True,
+            vad_parameters={
+                "threshold": 0.3,
+                "min_silence_duration_ms": 500,
+            },
         )
         if info.duration > MAX_DURATION_SEC:
             raise ValueError(
                 f"audio too long: {info.duration:.0f}s (max {MAX_DURATION_SEC}s)"
             )
-        text = "".join(seg.text for seg in segments).strip()
+        # One line per segment. faster-whisper segments on natural pauses,
+        # which usually correlate with sentence or speaker-change boundaries.
+        # True speaker diarization (pyannote) is a TODO — see CLAUDE notes.
+        text = "\n".join(seg.text.strip() for seg in segments if seg.text.strip())
         elapsed = time.time() - t0
         log.info(
             "transcribed %.1fs audio in %.1fs (%.1fx realtime) lang=%s",
