@@ -312,7 +312,7 @@ async function renderQr(qr: string): Promise<string[]> {
     const QRCode = await import('qrcode');
     const qrText = await QRCode.toString(qr, { type: 'terminal', small: true });
     const caption = k.dim(
-      '   Open WhatsApp → Settings → Linked Devices → Link a Device → scan.',
+      '   Open WhatsApp → You / Settings → Linked Devices → Link a Device → scan.',
     );
     return [...qrText.trimEnd().split('\n'), '', caption];
   } catch {
@@ -328,7 +328,7 @@ function formatPairingCard(code: string): string {
     '',
     `   ${brandBold(spaced)}`,
     '',
-    k.dim('   Open WhatsApp → Settings → Linked Devices → Link a Device'),
+    k.dim('   Open WhatsApp → You / Settings → Linked Devices → Link a Device'),
     k.dim('   → "Link with phone number instead" → enter this code.'),
     k.dim('   It expires in ~60 seconds.'),
   ].join('\n');
